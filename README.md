@@ -2,6 +2,8 @@
 
 [中文](#中文文档) | [English](#english-documentation)
 
+📚 **快速开始**: [QUICKSTART.md](QUICKSTART.md) | **Quick Start**: [QUICKSTART.md](QUICKSTART.md)
+
 ---
 
 ## 中文文档
@@ -17,6 +19,14 @@
 - 🎨 **现代化 UI**: 使用 Avalonia Fluent 主题
 - 📦 **MVVM 架构**: 采用 CommunityToolkit.Mvvm 实现
 - 🌍 **双语支持**: 中文/英文双语界面
+
+### 📚 文档
+
+- 📖 [快速开始指南](QUICKSTART.md) - 5分钟快速上手
+- 📘 [API 参考文档](API_REFERENCE.md) - 完整的 API 说明
+- 🚀 [部署指南](DEPLOYMENT.md) - 如何部署到各个平台
+- 🤝 [贡献指南](CONTRIBUTING.md) - 如何为项目做贡献
+- 📝 [更新日志](CHANGELOG.md) - 版本更新记录
 
 ### 🏗️ 项目结构
 
@@ -221,6 +231,14 @@ A cross-platform mobile auto-update solution based on the Avalonia framework, su
 - 🎨 **Modern UI**: Using Avalonia Fluent theme
 - 📦 **MVVM Architecture**: Implemented with CommunityToolkit.Mvvm
 - 🌍 **Bilingual**: Chinese/English bilingual interface
+
+### 📚 Documentation
+
+- 📖 [Quick Start Guide](QUICKSTART.md) - Get started in 5 minutes
+- 📘 [API Reference](API_REFERENCE.md) - Complete API documentation
+- 🚀 [Deployment Guide](DEPLOYMENT.md) - How to deploy to platforms
+- 🤝 [Contributing Guide](CONTRIBUTING.md) - How to contribute
+- 📝 [Changelog](CHANGELOG.md) - Version history
 
 ### 🏗️ Project Structure
 
