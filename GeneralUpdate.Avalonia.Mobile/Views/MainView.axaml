@@ -1,0 +1,143 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="using:GeneralUpdate.Avalonia.Mobile.ViewModels"
+             mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="450"
+             x:Class="GeneralUpdate.Avalonia.Mobile.Views.MainView"
+             x:DataType="vm:MainViewModel">
+  <Design.DataContext>
+    <!-- This only sets the DataContext for the previewer in an IDE,
+         to set the actual DataContext for runtime, set the DataContext property in code (look at App.axaml.cs) -->
+    <vm:MainViewModel />
+  </Design.DataContext>
+
+  <ScrollViewer>
+    <StackPanel Margin="20" Spacing="20">
+      <!-- Title -->
+      <TextBlock Text="{Binding Greeting}" 
+                 HorizontalAlignment="Center" 
+                 FontSize="24"
+                 FontWeight="Bold"
+                 TextWrapping="Wrap"
+                 TextAlignment="Center"/>
+
+      <!-- Current Version -->
+      <Border BorderBrush="{DynamicResource SystemAccentColor}" 
+              BorderThickness="1" 
+              CornerRadius="8" 
+              Padding="15">
+        <StackPanel Spacing="10">
+          <TextBlock Text="当前版本 / Current Version" 
+                     FontWeight="SemiBold"
+                     FontSize="16"/>
+          <TextBlock Text="{Binding CurrentVersion}" 
+                     FontSize="18"
+                     Foreground="{DynamicResource SystemAccentColor}"/>
+        </StackPanel>
+      </Border>
+
+      <!-- Update Status -->
+      <Border BorderBrush="{DynamicResource SystemControlForegroundBaseMediumBrush}" 
+              BorderThickness="1" 
+              CornerRadius="8" 
+              Padding="15">
+        <StackPanel Spacing="10">
+          <TextBlock Text="更新状态 / Update Status" 
+                     FontWeight="SemiBold"
+                     FontSize="16"/>
+          <TextBlock Text="{Binding UpdateStatus}" 
+                     TextWrapping="Wrap"
+                     FontSize="14"/>
+        </StackPanel>
+      </Border>
+
+      <!-- Download Progress -->
+      <Border BorderBrush="{DynamicResource SystemControlForegroundBaseMediumBrush}" 
+              BorderThickness="1" 
+              CornerRadius="8" 
+              Padding="15"
+              IsVisible="{Binding IsDownloading}">
+        <StackPanel Spacing="10">
+          <TextBlock Text="下载进度 / Download Progress" 
+                     FontWeight="SemiBold"
+                     FontSize="16"/>
+          <ProgressBar Value="{Binding DownloadProgress}" 
+                       Maximum="100"
+                       Height="30"/>
+          <TextBlock Text="{Binding DownloadProgress, StringFormat='{}{0}%'}" 
+                     HorizontalAlignment="Center"
+                     FontSize="14"/>
+        </StackPanel>
+      </Border>
+
+      <!-- Buttons -->
+      <StackPanel Spacing="15">
+        <Button Content="检查更新 / Check for Updates"
+                Command="{Binding CheckForUpdatesCommand}"
+                IsEnabled="{Binding !IsCheckingUpdate}"
+                HorizontalAlignment="Stretch"
+                HorizontalContentAlignment="Center"
+                Height="50"
+                FontSize="16">
+          <Button.Styles>
+            <Style Selector="Button">
+              <Setter Property="Background" Value="{DynamicResource SystemAccentColor}"/>
+              <Setter Property="Foreground" Value="White"/>
+            </Style>
+            <Style Selector="Button:pointerover">
+              <Setter Property="Background" Value="{DynamicResource SystemAccentColorLight1}"/>
+            </Style>
+          </Button.Styles>
+        </Button>
+
+        <Button Content="下载并安装 / Download and Install"
+                Command="{Binding DownloadAndInstallCommand}"
+                IsEnabled="{Binding HasUpdate}"
+                IsVisible="{Binding HasUpdate}"
+                HorizontalAlignment="Stretch"
+                HorizontalContentAlignment="Center"
+                Height="50"
+                FontSize="16">
+          <Button.Styles>
+            <Style Selector="Button">
+              <Setter Property="Background" Value="{DynamicResource SystemAccentColorDark1}"/>
+              <Setter Property="Foreground" Value="White"/>
+            </Style>
+            <Style Selector="Button:pointerover">
+              <Setter Property="Background" Value="{DynamicResource SystemAccentColor}"/>
+            </Style>
+          </Button.Styles>
+        </Button>
+      </StackPanel>
+
+      <!-- Instructions -->
+      <Border BorderBrush="{DynamicResource SystemControlForegroundBaseMediumBrush}" 
+              BorderThickness="1" 
+              CornerRadius="8" 
+              Padding="15"
+              Background="{DynamicResource SystemControlBackgroundAltHighBrush}">
+        <StackPanel Spacing="10">
+          <TextBlock Text="使用说明 / Instructions" 
+                     FontWeight="SemiBold"
+                     FontSize="16"/>
+          <TextBlock TextWrapping="Wrap"
+                     FontSize="12"
+                     Foreground="{DynamicResource SystemControlForegroundBaseMediumBrush}">
+            <Run Text="1. 点击「检查更新」按钮以查找新版本"/>
+            <LineBreak/>
+            <Run Text="   Click 'Check for Updates' to find new versions"/>
+            <LineBreak/><LineBreak/>
+            <Run Text="2. 如果有更新，点击「下载并安装」按钮"/>
+            <LineBreak/>
+            <Run Text="   If updates available, click 'Download and Install'"/>
+            <LineBreak/><LineBreak/>
+            <Run Text="3. 在 MainViewModel.cs 中配置您的更新服务器地址"/>
+            <LineBreak/>
+            <Run Text="   Configure your update server URL in MainViewModel.cs"/>
+          </TextBlock>
+        </StackPanel>
+      </Border>
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>
