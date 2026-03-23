@@ -46,7 +46,7 @@ jobs:
           dotnet-version: 8.0.x
 
       - name: Install Android workload
-        run: dotnet workload install android wasm-tools-net8
+        run: dotnet workload install android
 
       - name: Restore Android project
         run: dotnet restore src/GeneralUpdate.Avalonia.Android/GeneralUpdate.Avalonia.Android.csproj
