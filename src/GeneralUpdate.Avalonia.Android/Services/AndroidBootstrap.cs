@@ -4,7 +4,7 @@ using GeneralUpdate.Avalonia.Android.Models;
 
 namespace GeneralUpdate.Avalonia.Android.Services;
 
-public sealed class AndroidUpdateManager : IAndroidUpdateManager
+public sealed class AndroidBootstrap : IAndroidBootstrap
 {
     private readonly IVersionComparer _versionComparer;
     private readonly IUpdateDownloader _downloader;
@@ -17,7 +17,7 @@ public sealed class AndroidUpdateManager : IAndroidUpdateManager
     private readonly object _sync = new();
     private UpdateStateSnapshot _snapshot = new(UpdateState.None, UpdateFailureReason.None, null);
 
-    public AndroidUpdateManager(
+    public AndroidBootstrap(
         IVersionComparer versionComparer,
         IUpdateDownloader downloader,
         IHashValidator hashValidator,
@@ -35,10 +35,10 @@ public sealed class AndroidUpdateManager : IAndroidUpdateManager
         _logger = logger ?? new NoOpUpdateLogger();
     }
 
-    public event EventHandler<UpdateFoundEventArgs>? UpdateFound;
-    public event EventHandler<DownloadProgressChangedEventArgs>? DownloadProgressChanged;
-    public event EventHandler<UpdateCompletedEventArgs>? UpdateCompleted;
-    public event EventHandler<UpdateFailedEventArgs>? UpdateFailed;
+    public event EventHandler<ValidateEventArgs>? AddListenerValidate;
+    public event EventHandler<DownloadProgressChangedEventArgs>? AddListenerDownloadProgressChanged;
+    public event EventHandler<UpdateCompletedEventArgs>? AddListenerUpdateCompleted;
+    public event EventHandler<UpdateFailedEventArgs>? AddListenerUpdateFailed;
 
     public UpdateStateSnapshot GetSnapshot()
     {
@@ -48,7 +48,7 @@ public sealed class AndroidUpdateManager : IAndroidUpdateManager
         }
     }
 
-    public Task<UpdateCheckResult> CheckForUpdateAsync(UpdatePackageInfo packageInfo, string currentVersion, CancellationToken cancellationToken = default)
+    public Task<UpdateCheckResult> ValidateAsync(UpdatePackageInfo packageInfo, string currentVersion, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         SetState(UpdateState.Checking, UpdateFailureReason.None, "Checking for updates.");
@@ -90,7 +90,7 @@ public sealed class AndroidUpdateManager : IAndroidUpdateManager
         if (compare > 0)
         {
             SetState(UpdateState.UpdateAvailable, UpdateFailureReason.None, "Update available.");
-            RaiseUpdateFound(packageInfo, currentVersion);
+            RaiseValidate(packageInfo, currentVersion);
 
             return Task.FromResult(new UpdateCheckResult
             {
@@ -220,27 +220,27 @@ public sealed class AndroidUpdateManager : IAndroidUpdateManager
         RaiseFailed(result);
     }
 
-    private void RaiseUpdateFound(UpdatePackageInfo packageInfo, string currentVersion)
+    private void RaiseValidate(UpdatePackageInfo packageInfo, string currentVersion)
     {
-        var args = new UpdateFoundEventArgs(packageInfo, currentVersion);
-        _eventDispatcher.Dispatch(() => UpdateFound?.Invoke(this, args));
+        var args = new ValidateEventArgs(packageInfo, currentVersion);
+        _eventDispatcher.Dispatch(() => AddListenerValidate?.Invoke(this, args));
     }
 
     private void RaiseDownloadProgress(DownloadProgressInfo progress)
     {
         var args = new DownloadProgressChangedEventArgs(progress);
-        _eventDispatcher.Dispatch(() => DownloadProgressChanged?.Invoke(this, args));
+        _eventDispatcher.Dispatch(() => AddListenerDownloadProgressChanged?.Invoke(this, args));
     }
 
     private void RaiseCompleted(UpdateOperationResult result)
     {
         var args = new UpdateCompletedEventArgs(result);
-        _eventDispatcher.Dispatch(() => UpdateCompleted?.Invoke(this, args));
+        _eventDispatcher.Dispatch(() => AddListenerUpdateCompleted?.Invoke(this, args));
     }
 
     private void RaiseFailed(UpdateOperationResult result)
     {
         var args = new UpdateFailedEventArgs(result);
-        _eventDispatcher.Dispatch(() => UpdateFailed?.Invoke(this, args));
+        _eventDispatcher.Dispatch(() => AddListenerUpdateFailed?.Invoke(this, args));
     }
 }

@@ -3,16 +3,16 @@ using GeneralUpdate.Avalonia.Android.Models;
 
 namespace GeneralUpdate.Avalonia.Android.Abstractions;
 
-public interface IAndroidUpdateManager
+public interface IAndroidBootstrap
 {
-    event EventHandler<UpdateFoundEventArgs>? UpdateFound;
-    event EventHandler<DownloadProgressChangedEventArgs>? DownloadProgressChanged;
-    event EventHandler<UpdateCompletedEventArgs>? UpdateCompleted;
-    event EventHandler<UpdateFailedEventArgs>? UpdateFailed;
+    event EventHandler<ValidateEventArgs>? AddListenerValidate;
+    event EventHandler<DownloadProgressChangedEventArgs>? AddListenerDownloadProgressChanged;
+    event EventHandler<UpdateCompletedEventArgs>? AddListenerUpdateCompleted;
+    event EventHandler<UpdateFailedEventArgs>? AddListenerUpdateFailed;
 
     UpdateStateSnapshot GetSnapshot();
 
-    Task<UpdateCheckResult> CheckForUpdateAsync(
+    Task<UpdateCheckResult> ValidateAsync(
         UpdatePackageInfo packageInfo,
         string currentVersion,
         CancellationToken cancellationToken = default);

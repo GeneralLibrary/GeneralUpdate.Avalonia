@@ -2,7 +2,7 @@
 
 ## 1. Overall architecture design
 
-- `AndroidUpdateManager` orchestrates checking, download, verification, and installer launching.
+- `AndroidBootstrap` orchestrates validation, download, verification, and installer launching.
 - `IVersionComparer` provides replaceable version comparison strategy (`SystemVersionComparer` by default).
 - `IUpdateDownloader` encapsulates resumable HTTP download with sidecar metadata and smoothed speed reporting.
 - `IHashValidator` validates package integrity (SHA256).
@@ -19,7 +19,7 @@ src/GeneralUpdate.Avalonia.Android
 ├── Events/
 ├── Models/
 ├── Services/
-├── AndroidUpdateServiceCollection.cs
+├── GeneralUpdateBootstrap.cs
 └── GeneralUpdate.Avalonia.Android.csproj
 ```
 
@@ -87,9 +87,9 @@ var options = new AndroidUpdateOptions
     FileProviderAuthority = "com.example.app.generalupdate.fileprovider"
 };
 
-var manager = AndroidUpdateServiceCollection.CreateDefault(options, eventDispatcher: new AvaloniaUiDispatcher());
+var manager = GeneralUpdateBootstrap.CreateDefault(options, eventDispatcher: new AvaloniaUiDispatcher());
 
-var check = await manager.CheckForUpdateAsync(packageInfo, currentVersion, ct);
+var check = await manager.ValidateAsync(packageInfo, currentVersion, ct);
 if (check.UpdateFound)
 {
     var prepared = await manager.DownloadAndVerifyAsync(packageInfo, ct);

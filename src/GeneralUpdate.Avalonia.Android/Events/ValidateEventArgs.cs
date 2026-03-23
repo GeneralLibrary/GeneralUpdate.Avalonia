@@ -2,9 +2,9 @@ using GeneralUpdate.Avalonia.Android.Models;
 
 namespace GeneralUpdate.Avalonia.Android.Events;
 
-public sealed class UpdateFoundEventArgs : EventArgs
+public sealed class ValidateEventArgs : EventArgs
 {
-    public UpdateFoundEventArgs(UpdatePackageInfo packageInfo, string currentVersion)
+    public ValidateEventArgs(UpdatePackageInfo packageInfo, string currentVersion)
     {
         PackageInfo = packageInfo;
         CurrentVersion = currentVersion;

@@ -5,9 +5,9 @@ using GeneralUpdate.Avalonia.Android.Services;
 
 namespace GeneralUpdate.Avalonia.Android;
 
-public static class AndroidUpdateServiceCollection
+public static class GeneralUpdateBootstrap
 {
-    public static IAndroidUpdateManager CreateDefault(
+    public static IAndroidBootstrap CreateDefault(
         AndroidUpdateOptions options,
         IAndroidContextProvider? contextProvider = null,
         IAndroidActivityProvider? activityProvider = null,
@@ -42,7 +42,7 @@ public static class AndroidUpdateServiceCollection
             effectiveOptions,
             usedLogger);
 
-        return new AndroidUpdateManager(
+        return new AndroidBootstrap(
             versionComparer ?? new SystemVersionComparer(),
             downloader,
             validator,
