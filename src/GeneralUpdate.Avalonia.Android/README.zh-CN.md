@@ -1,6 +1,6 @@
 # GeneralUpdate.Avalonia.Android
 
-面向 Avalonia 11+ 应用的 Android 自动更新核心库（无 UI，`net8.0-android`）。
+面向 Avalonia 12+ 应用的 Android 自动更新核心库（无 UI，`net8.0-android`）。
 
 ## 功能特性
 

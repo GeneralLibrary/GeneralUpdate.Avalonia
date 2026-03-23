@@ -1,6 +1,6 @@
 # GeneralUpdate.Avalonia.Android
 
-UI-free Android auto-update core for Avalonia 11+ apps (`net8.0-android`).
+UI-free Android auto-update core for Avalonia 12+ apps (`net8.0-android`).
 
 ## Features
 
