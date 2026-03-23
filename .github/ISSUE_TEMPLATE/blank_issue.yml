@@ -1,0 +1,9 @@
+name: Blank issue
+description: Open an issue with a custom format.
+title: "[Issue]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please provide enough context so maintainers can help effectively.
+

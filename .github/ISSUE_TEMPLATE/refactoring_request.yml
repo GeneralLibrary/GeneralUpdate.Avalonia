@@ -1,0 +1,50 @@
+name: Refactoring request
+description: Propose internal improvements without changing behavior.
+title: "[Refactor]: "
+labels:
+  - refactor
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for maintainability improvements, cleanup, and technical debt reduction.
+  - type: textarea
+    id: scope
+    attributes:
+      label: Refactoring scope
+      description: Which module/file/area should be refactored?
+      placeholder: e.g. src/GeneralUpdate.Avalonia.Android/Services/...
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: Why is this refactoring needed?
+    validations:
+      required: true
+  - type: textarea
+    id: current
+    attributes:
+      label: Current pain points
+      description: Describe complexity, duplication, readability, or testability issues.
+    validations:
+      required: true
+  - type: textarea
+    id: desired
+    attributes:
+      label: Desired outcome
+      description: What should be improved after refactoring?
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints
+      description: Any boundaries (no API change, performance constraints, etc.).
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Add references, related issues, or code snippets.
+
