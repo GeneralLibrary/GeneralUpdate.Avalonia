@@ -1,4 +1,4 @@
-name: Bug report
+name: 🐞 Bug report
 description: Report a reproducible problem in GeneralUpdate.Avalonia.Android.
 title: "[Bug]: "
 labels:
@@ -7,6 +7,8 @@ body:
   - type: markdown
     attributes:
       value: |
+        ![Bug emoji](https://github.githubassets.com/images/icons/emoji/unicode/1f41e.png?v8)
+
         Thanks for reporting a bug. Please provide enough details for us to reproduce and fix it quickly.
   - type: textarea
     id: summary

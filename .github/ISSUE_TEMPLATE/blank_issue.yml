@@ -1,9 +1,10 @@
-name: Blank issue
+name: 📝 Blank issue
 description: Open an issue with a custom format.
 title: "[Issue]: "
 body:
   - type: markdown
     attributes:
       value: |
-        Please provide enough context so maintainers can help effectively.
+        ![Blank issue emoji](https://github.githubassets.com/images/icons/emoji/unicode/1f4dd.png?v8)
 
+        Please provide enough context so maintainers can help effectively.
