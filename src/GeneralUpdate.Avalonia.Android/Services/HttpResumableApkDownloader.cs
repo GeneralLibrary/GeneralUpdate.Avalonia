@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.Diagnostics;
 using System.Text.Json;
 using GeneralUpdate.Avalonia.Android.Abstractions;
 using GeneralUpdate.Avalonia.Android.Models;
@@ -14,6 +15,7 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader
     private readonly IFileStorage _fileStorage;
     private readonly AndroidUpdateOptions _options;
     private readonly IUpdateLogger _logger;
+    private readonly JsonSerializerOptions _jsonOptions = new() { PropertyNameCaseInsensitive = true };
 
     public HttpResumableApkDownloader(HttpClient httpClient, IFileStorage fileStorage, AndroidUpdateOptions options, IUpdateLogger? logger = null)
     {
@@ -203,20 +205,32 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader
             return false;
         }
 
-        var existingJson = await _fileStorage.ReadAllTextAsync(sidecarPath, cancellationToken).ConfigureAwait(false);
-        if (string.IsNullOrWhiteSpace(existingJson))
-        {
-            _fileStorage.DeleteFile(tempFilePath);
-            _fileStorage.DeleteFile(sidecarPath);
-            return false;
-        }
+            var existingJson = await _fileStorage.ReadAllTextAsync(sidecarPath, cancellationToken).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(existingJson))
+            {
+                _fileStorage.DeleteFile(tempFilePath);
+                _fileStorage.DeleteFile(sidecarPath);
+                return false;
+            }
 
-        var actual = JsonSerializer.Deserialize<DownloadResumeMetadata>(existingJson);
-        if (actual is null || !CanResume(expected, actual))
-        {
-            _fileStorage.DeleteFile(tempFilePath);
-            _fileStorage.DeleteFile(sidecarPath);
-            return false;
+            DownloadResumeMetadata? actual;
+            try
+            {
+                actual = JsonSerializer.Deserialize<DownloadResumeMetadata>(existingJson, _jsonOptions);
+            }
+            catch (JsonException ex)
+            {
+                _logger.LogWarning($"Resume sidecar is invalid JSON. Restarting download. {ex.Message}");
+                _fileStorage.DeleteFile(tempFilePath);
+                _fileStorage.DeleteFile(sidecarPath);
+                return false;
+            }
+
+            if (actual is null || !CanResume(expected, actual))
+            {
+                _fileStorage.DeleteFile(tempFilePath);
+                _fileStorage.DeleteFile(sidecarPath);
+                return false;
         }
 
         return true;
@@ -304,7 +318,7 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader
     private sealed class SmoothedSpeedMeter
     {
         private readonly TimeSpan _window;
-        private readonly Queue<(DateTimeOffset Timestamp, long Bytes)> _samples = new();
+        private readonly Queue<(long TimestampTicks, long Bytes)> _samples = new();
 
         public SmoothedSpeedMeter(int windowSeconds)
         {
@@ -313,10 +327,11 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader
 
         public double GetSpeed(long downloadedBytes)
         {
-            var now = DateTimeOffset.UtcNow;
-            _samples.Enqueue((now, downloadedBytes));
+            var nowTicks = Stopwatch.GetTimestamp();
+            _samples.Enqueue((nowTicks, downloadedBytes));
+            var windowTicks = (long)(_window.TotalSeconds * Stopwatch.Frequency);
 
-            while (_samples.Count > 2 && now - _samples.Peek().Timestamp > _window)
+            while (_samples.Count > 2 && nowTicks - _samples.Peek().TimestampTicks > windowTicks)
             {
                 _samples.Dequeue();
             }
@@ -327,7 +342,8 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader
             }
 
             var oldest = _samples.Peek();
-            var elapsed = (now - oldest.Timestamp).TotalSeconds;
+            var elapsedTicks = nowTicks - oldest.TimestampTicks;
+            var elapsed = elapsedTicks / (double)Stopwatch.Frequency;
             if (elapsed <= 0)
             {
                 return 0;

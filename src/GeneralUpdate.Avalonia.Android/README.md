@@ -1,5 +1,10 @@
 # GeneralUpdate.Avalonia.Android
 
+Localized docs:
+
+- English: `README.en.md`
+- 中文：`README.zh-CN.md`
+
 ## 1. Overall architecture design
 
 - `AndroidBootstrap` orchestrates validation, download, verification, and installer launching.

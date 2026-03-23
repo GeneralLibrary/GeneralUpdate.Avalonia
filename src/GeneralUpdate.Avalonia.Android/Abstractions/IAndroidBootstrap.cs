@@ -3,7 +3,7 @@ using GeneralUpdate.Avalonia.Android.Models;
 
 namespace GeneralUpdate.Avalonia.Android.Abstractions;
 
-public interface IAndroidBootstrap
+public interface IAndroidBootstrap : IDisposable
 {
     event EventHandler<ValidateEventArgs>? AddListenerValidate;
     event EventHandler<DownloadProgressChangedEventArgs>? AddListenerDownloadProgressChanged;

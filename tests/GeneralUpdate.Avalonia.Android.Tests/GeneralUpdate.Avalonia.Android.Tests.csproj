@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.2" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Abstractions/IApkInstaller.cs" Link="Source/Abstractions/IApkInstaller.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Abstractions/IAndroidBootstrap.cs" Link="Source/Abstractions/IAndroidBootstrap.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Abstractions/IFileStorage.cs" Link="Source/Abstractions/IFileStorage.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Abstractions/IHashValidator.cs" Link="Source/Abstractions/IHashValidator.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Abstractions/IUpdateDownloader.cs" Link="Source/Abstractions/IUpdateDownloader.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Abstractions/IUpdateEventDispatcher.cs" Link="Source/Abstractions/IUpdateEventDispatcher.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Abstractions/IUpdateLogger.cs" Link="Source/Abstractions/IUpdateLogger.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Abstractions/IVersionComparer.cs" Link="Source/Abstractions/IVersionComparer.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Enums/UpdateFailureReason.cs" Link="Source/Enums/UpdateFailureReason.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Enums/UpdateState.cs" Link="Source/Enums/UpdateState.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Events/DownloadProgressChangedEventArgs.cs" Link="Source/Events/DownloadProgressChangedEventArgs.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Events/UpdateCompletedEventArgs.cs" Link="Source/Events/UpdateCompletedEventArgs.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Events/UpdateFailedEventArgs.cs" Link="Source/Events/UpdateFailedEventArgs.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Events/ValidateEventArgs.cs" Link="Source/Events/ValidateEventArgs.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Models/DownloadProgressInfo.cs" Link="Source/Models/DownloadProgressInfo.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Models/DownloadResult.cs" Link="Source/Models/DownloadResult.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Models/HashValidationResult.cs" Link="Source/Models/HashValidationResult.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Models/InstallResult.cs" Link="Source/Models/InstallResult.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Models/UpdateCheckResult.cs" Link="Source/Models/UpdateCheckResult.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Models/UpdateOperationResult.cs" Link="Source/Models/UpdateOperationResult.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Models/UpdatePackageInfo.cs" Link="Source/Models/UpdatePackageInfo.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Models/UpdateStateSnapshot.cs" Link="Source/Models/UpdateStateSnapshot.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Services/AndroidBootstrap.cs" Link="Source/Services/AndroidBootstrap.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Services/ImmediateEventDispatcher.cs" Link="Source/Services/ImmediateEventDispatcher.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Services/NoOpUpdateLogger.cs" Link="Source/Services/NoOpUpdateLogger.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Services/SystemVersionComparer.cs" Link="Source/Services/SystemVersionComparer.cs" />
+  </ItemGroup>
+</Project>

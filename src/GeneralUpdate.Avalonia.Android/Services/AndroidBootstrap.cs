@@ -13,6 +13,8 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
     private readonly IFileStorage _fileStorage;
     private readonly IUpdateEventDispatcher _eventDispatcher;
     private readonly IUpdateLogger _logger;
+    private readonly SemaphoreSlim _operationGate = new(1, 1);
+    private bool _disposed;
 
     private readonly object _sync = new();
     private UpdateStateSnapshot _snapshot = new(UpdateState.None, UpdateFailureReason.None, null);
@@ -26,11 +28,11 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
         IUpdateEventDispatcher? eventDispatcher = null,
         IUpdateLogger? logger = null)
     {
-        _versionComparer = versionComparer;
-        _downloader = downloader;
-        _hashValidator = hashValidator;
-        _apkInstaller = apkInstaller;
-        _fileStorage = fileStorage;
+        _versionComparer = versionComparer ?? throw new ArgumentNullException(nameof(versionComparer));
+        _downloader = downloader ?? throw new ArgumentNullException(nameof(downloader));
+        _hashValidator = hashValidator ?? throw new ArgumentNullException(nameof(hashValidator));
+        _apkInstaller = apkInstaller ?? throw new ArgumentNullException(nameof(apkInstaller));
+        _fileStorage = fileStorage ?? throw new ArgumentNullException(nameof(fileStorage));
         _eventDispatcher = eventDispatcher ?? new ImmediateEventDispatcher();
         _logger = logger ?? new NoOpUpdateLogger();
     }
@@ -42,167 +44,195 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
 
     public UpdateStateSnapshot GetSnapshot()
     {
+        ThrowIfDisposed();
         lock (_sync)
         {
             return _snapshot;
         }
     }
 
-    public Task<UpdateCheckResult> ValidateAsync(UpdatePackageInfo packageInfo, string currentVersion, CancellationToken cancellationToken = default)
+    public async Task<UpdateCheckResult> ValidateAsync(UpdatePackageInfo packageInfo, string currentVersion, CancellationToken cancellationToken = default)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        SetState(UpdateState.Checking, UpdateFailureReason.None, "Checking for updates.");
-
-        if (string.IsNullOrWhiteSpace(currentVersion) || string.IsNullOrWhiteSpace(packageInfo.Version))
+        ThrowIfDisposed();
+        await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            var invalid = new UpdateCheckResult
+            cancellationToken.ThrowIfCancellationRequested();
+            SetState(UpdateState.Checking, UpdateFailureReason.None, "Checking for updates.");
+
+            if (string.IsNullOrWhiteSpace(currentVersion) || string.IsNullOrWhiteSpace(packageInfo.Version))
             {
-                Success = false,
-                UpdateFound = false,
-                State = UpdateState.Failed,
-                FailureReason = UpdateFailureReason.InvalidMetadata,
-                Message = "Current version or target version is empty.",
-                PackageInfo = packageInfo,
-                CurrentVersion = currentVersion
-            };
+                var invalid = new UpdateCheckResult
+                {
+                    Success = false,
+                    UpdateFound = false,
+                    State = UpdateState.Failed,
+                    FailureReason = UpdateFailureReason.InvalidMetadata,
+                    Message = "Current version or target version is empty.",
+                    PackageInfo = packageInfo,
+                    CurrentVersion = currentVersion
+                };
 
-            HandleFailure(invalid);
-            return Task.FromResult(invalid);
-        }
+                HandleFailure(invalid);
+                return invalid;
+            }
 
-        if (!_versionComparer.TryCompare(currentVersion, packageInfo.Version, out var compare, out var error))
-        {
-            var failed = new UpdateCheckResult
+            if (!_versionComparer.TryCompare(currentVersion, packageInfo.Version, out var compare, out var error))
             {
-                Success = false,
-                UpdateFound = false,
-                State = UpdateState.Failed,
-                FailureReason = UpdateFailureReason.VersionComparisonFailed,
-                Message = error ?? "Failed to compare versions.",
-                PackageInfo = packageInfo,
-                CurrentVersion = currentVersion
-            };
+                var failed = new UpdateCheckResult
+                {
+                    Success = false,
+                    UpdateFound = false,
+                    State = UpdateState.Failed,
+                    FailureReason = UpdateFailureReason.VersionComparisonFailed,
+                    Message = error ?? "Failed to compare versions.",
+                    PackageInfo = packageInfo,
+                    CurrentVersion = currentVersion
+                };
 
-            HandleFailure(failed);
-            return Task.FromResult(failed);
-        }
+                HandleFailure(failed);
+                return failed;
+            }
 
-        if (compare > 0)
-        {
-            SetState(UpdateState.UpdateAvailable, UpdateFailureReason.None, "Update available.");
-            RaiseValidate(packageInfo, currentVersion);
+            if (compare > 0)
+            {
+                SetState(UpdateState.UpdateAvailable, UpdateFailureReason.None, "Update available.");
+                RaiseValidate(packageInfo, currentVersion);
 
-            return Task.FromResult(new UpdateCheckResult
+                return new UpdateCheckResult
+                {
+                    Success = true,
+                    UpdateFound = true,
+                    State = UpdateState.UpdateAvailable,
+                    FailureReason = UpdateFailureReason.None,
+                    Message = "Update available.",
+                    PackageInfo = packageInfo,
+                    CurrentVersion = currentVersion
+                };
+            }
+
+            SetState(UpdateState.Completed, UpdateFailureReason.None, "No update available.");
+
+            return new UpdateCheckResult
             {
                 Success = true,
-                UpdateFound = true,
-                State = UpdateState.UpdateAvailable,
+                UpdateFound = false,
+                State = UpdateState.Completed,
                 FailureReason = UpdateFailureReason.None,
-                Message = "Update available.",
+                Message = "No update available.",
                 PackageInfo = packageInfo,
                 CurrentVersion = currentVersion
-            });
+            };
         }
-
-        SetState(UpdateState.Completed, UpdateFailureReason.None, "No update available.");
-
-        return Task.FromResult(new UpdateCheckResult
+        finally
         {
-            Success = true,
-            UpdateFound = false,
-            State = UpdateState.Completed,
-            FailureReason = UpdateFailureReason.None,
-            Message = "No update available.",
-            PackageInfo = packageInfo,
-            CurrentVersion = currentVersion
-        });
+            _operationGate.Release();
+        }
     }
 
     public async Task<UpdateOperationResult> DownloadAndVerifyAsync(UpdatePackageInfo packageInfo, CancellationToken cancellationToken = default)
     {
-        SetState(UpdateState.Downloading, UpdateFailureReason.None, "Downloading package.");
-
-        var downloadResult = await _downloader.DownloadAsync(
-            packageInfo,
-            progress => RaiseDownloadProgress(progress),
-            cancellationToken).ConfigureAwait(false);
-
-        if (!downloadResult.Success || string.IsNullOrWhiteSpace(downloadResult.FilePath))
+        ThrowIfDisposed();
+        await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            HandleFailure(downloadResult);
-            return downloadResult;
-        }
+            SetState(UpdateState.Downloading, UpdateFailureReason.None, "Downloading package.");
 
-        if (packageInfo.FileSize > 0)
-        {
-            var actualLength = _fileStorage.GetFileLength(downloadResult.FilePath);
-            if (actualLength != packageInfo.FileSize)
+            var downloadResult = await _downloader.DownloadAsync(
+                packageInfo,
+                progress => RaiseDownloadProgress(progress),
+                cancellationToken).ConfigureAwait(false);
+
+            if (!downloadResult.Success || string.IsNullOrWhiteSpace(downloadResult.FilePath))
+            {
+                HandleFailure(downloadResult);
+                return downloadResult;
+            }
+
+            if (packageInfo.FileSize > 0)
+            {
+                var actualLength = _fileStorage.GetFileLength(downloadResult.FilePath);
+                if (actualLength != packageInfo.FileSize)
+                {
+                    _fileStorage.DeleteFile(downloadResult.FilePath);
+                    var sizeFailed = new UpdateOperationResult
+                    {
+                        Success = false,
+                        State = UpdateState.Failed,
+                        FailureReason = UpdateFailureReason.FileIoError,
+                        Message = $"Downloaded file size mismatch. Expected {packageInfo.FileSize}, actual {actualLength}.",
+                        PackageInfo = packageInfo,
+                        FilePath = downloadResult.FilePath
+                    };
+                    HandleFailure(sizeFailed);
+                    return sizeFailed;
+                }
+            }
+
+            SetState(UpdateState.Verifying, UpdateFailureReason.None, "Validating package hash.");
+            var hashResult = await _hashValidator.ValidateSha256Async(downloadResult.FilePath, packageInfo.Sha256, cancellationToken).ConfigureAwait(false);
+
+            if (!hashResult.Success)
             {
                 _fileStorage.DeleteFile(downloadResult.FilePath);
-                var sizeFailed = new UpdateOperationResult
+                var failed = hashResult with
                 {
-                    Success = false,
-                    State = UpdateState.Failed,
-                    FailureReason = UpdateFailureReason.FileIoError,
-                    Message = $"Downloaded file size mismatch. Expected {packageInfo.FileSize}, actual {actualLength}.",
                     PackageInfo = packageInfo,
-                    FilePath = downloadResult.FilePath
+                    State = UpdateState.Failed,
+                    FailureReason = hashResult.FailureReason == UpdateFailureReason.None ? UpdateFailureReason.HashMismatch : hashResult.FailureReason,
+                    Message = hashResult.Message ?? "SHA256 validation failed."
                 };
-                HandleFailure(sizeFailed);
-                return sizeFailed;
+                HandleFailure(failed);
+                return failed;
             }
-        }
 
-        SetState(UpdateState.Verifying, UpdateFailureReason.None, "Validating package hash.");
-        var hashResult = await _hashValidator.ValidateSha256Async(downloadResult.FilePath, packageInfo.Sha256, cancellationToken).ConfigureAwait(false);
-
-        if (!hashResult.Success)
-        {
-            _fileStorage.DeleteFile(downloadResult.FilePath);
-            var failed = hashResult with
+            var completed = new UpdateOperationResult
             {
+                Success = true,
+                State = UpdateState.ReadyToInstall,
+                FailureReason = UpdateFailureReason.None,
+                Message = "Package downloaded and verified.",
                 PackageInfo = packageInfo,
-                State = UpdateState.Failed,
-                FailureReason = hashResult.FailureReason == UpdateFailureReason.None ? UpdateFailureReason.HashMismatch : hashResult.FailureReason,
-                Message = hashResult.Message ?? "SHA256 validation failed."
+                FilePath = downloadResult.FilePath
             };
-            HandleFailure(failed);
-            return failed;
+
+            SetState(completed.State, completed.FailureReason, completed.Message);
+            RaiseCompleted(completed);
+            return completed;
         }
-
-        var completed = new UpdateOperationResult
+        finally
         {
-            Success = true,
-            State = UpdateState.ReadyToInstall,
-            FailureReason = UpdateFailureReason.None,
-            Message = "Package downloaded and verified.",
-            PackageInfo = packageInfo,
-            FilePath = downloadResult.FilePath
-        };
-
-        SetState(completed.State, completed.FailureReason, completed.Message);
-        RaiseCompleted(completed);
-        return completed;
+            _operationGate.Release();
+        }
     }
 
     public async Task<InstallResult> LaunchInstallerAsync(UpdatePackageInfo packageInfo, string apkFilePath, CancellationToken cancellationToken = default)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        SetState(UpdateState.Installing, UpdateFailureReason.None, "Launching installer.");
-
-        var result = await _apkInstaller.LaunchInstallAsync(packageInfo, apkFilePath, cancellationToken).ConfigureAwait(false);
-
-        if (result.Success)
+        ThrowIfDisposed();
+        await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            SetState(UpdateState.Installing, UpdateFailureReason.None, result.Message ?? "Installer launched.");
-            RaiseCompleted(result);
-        }
-        else
-        {
-            HandleFailure(result);
-        }
+            cancellationToken.ThrowIfCancellationRequested();
+            SetState(UpdateState.Installing, UpdateFailureReason.None, "Launching installer.");
 
-        return result;
+            var result = await _apkInstaller.LaunchInstallAsync(packageInfo, apkFilePath, cancellationToken).ConfigureAwait(false);
+
+            if (result.Success)
+            {
+                SetState(UpdateState.Installing, UpdateFailureReason.None, result.Message ?? "Installer launched.");
+                RaiseCompleted(result);
+            }
+            else
+            {
+                HandleFailure(result);
+            }
+
+            return result;
+        }
+        finally
+        {
+            _operationGate.Release();
+        }
     }
 
     private void SetState(UpdateState state, UpdateFailureReason failureReason, string? message)
@@ -242,5 +272,21 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
     {
         var args = new UpdateFailedEventArgs(result);
         _eventDispatcher.Dispatch(() => AddListenerUpdateFailed?.Invoke(this, args));
+    }
+
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _operationGate.Dispose();
+        _disposed = true;
+    }
+
+    private void ThrowIfDisposed()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
     }
 }
