@@ -8,6 +8,8 @@ namespace GeneralUpdate.Avalonia.Android.Services;
 
 public sealed class HttpResumableApkDownloader : IUpdateDownloader
 {
+    private static readonly HashSet<char> InvalidFileNameChars = Path.GetInvalidFileNameChars().ToHashSet();
+
     private readonly HttpClient _httpClient;
     private readonly IFileStorage _fileStorage;
     private readonly AndroidUpdateOptions _options;
@@ -117,7 +119,7 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader
             return new DownloadResult
             {
                 Success = true,
-                State = UpdateState.Downloading,
+                State = UpdateState.Completed,
                 FailureReason = UpdateFailureReason.None,
                 Message = "Download finished.",
                 PackageInfo = packageInfo,
@@ -289,8 +291,7 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader
             candidate = $"update-{packageInfo.Version}.apk";
         }
 
-        var invalidChars = Path.GetInvalidFileNameChars();
-        var sanitized = new string(candidate.Select(c => invalidChars.Contains(c) ? '_' : c).ToArray());
+        var sanitized = new string(candidate.Select(c => InvalidFileNameChars.Contains(c) ? '_' : c).ToArray());
 
         if (!sanitized.EndsWith(".apk", StringComparison.OrdinalIgnoreCase))
         {
@@ -315,7 +316,7 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader
             var now = DateTimeOffset.UtcNow;
             _samples.Enqueue((now, downloadedBytes));
 
-            while (_samples.Count > 1 && now - _samples.Peek().Timestamp > _window)
+            while (_samples.Count > 2 && now - _samples.Peek().Timestamp > _window)
             {
                 _samples.Dequeue();
             }

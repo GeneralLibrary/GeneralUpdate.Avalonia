@@ -69,7 +69,8 @@ public sealed class AndroidApkInstaller : IApkInstaller
             });
         }
 
-        if (Build.VERSION.SdkInt >= BuildVersionCodes.O && !context.PackageManager!.CanRequestPackageInstalls())
+        var packageManager = context.PackageManager;
+        if (Build.VERSION.SdkInt >= BuildVersionCodes.O && (packageManager is null || !packageManager.CanRequestPackageInstalls()))
         {
             return Task.FromResult(new InstallResult
             {

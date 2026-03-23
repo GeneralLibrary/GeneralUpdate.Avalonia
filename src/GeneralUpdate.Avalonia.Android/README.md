@@ -49,7 +49,7 @@ public sealed class AvaloniaUiDispatcher : IUpdateEventDispatcher
 <application ...>
   <provider
     android:name="androidx.core.content.FileProvider"
-    android:authorities="${applicationId}.generalupdate.fileprovider"
+    android:authorities="com.example.app.generalupdate.fileprovider"
     android:exported="false"
     android:grantUriPermissions="true">
     <meta-data
@@ -58,6 +58,8 @@ public sealed class AvaloniaUiDispatcher : IUpdateEventDispatcher
   </provider>
 </application>
 ```
+
+> If your Android manifest placeholders support `${applicationId}`, you can use `${applicationId}.generalupdate.fileprovider` instead.
 
 `Resources/xml/generalupdate_file_paths.xml`
 
