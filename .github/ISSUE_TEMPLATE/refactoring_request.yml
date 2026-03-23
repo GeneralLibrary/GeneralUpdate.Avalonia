@@ -1,4 +1,4 @@
-name: Refactoring request
+name: ♻️ Refactoring request
 description: Propose internal improvements without changing behavior.
 title: "[Refactor]: "
 labels:
@@ -7,6 +7,8 @@ body:
   - type: markdown
     attributes:
       value: |
+        ![Refactor emoji](https://github.githubassets.com/images/icons/emoji/unicode/267b.png?v8)
+
         Use this template for maintainability improvements, cleanup, and technical debt reduction.
   - type: textarea
     id: scope
@@ -47,4 +49,3 @@ body:
     attributes:
       label: Additional context
       description: Add references, related issues, or code snippets.
-

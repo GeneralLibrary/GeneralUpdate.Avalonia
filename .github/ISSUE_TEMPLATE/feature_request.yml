@@ -1,4 +1,4 @@
-name: Feature request
+name: ✨ Feature request
 description: Suggest a new capability for GeneralUpdate.Avalonia.Android.
 title: "[Feature]: "
 labels:
@@ -7,6 +7,8 @@ body:
   - type: markdown
     attributes:
       value: |
+        ![Feature emoji](https://github.githubassets.com/images/icons/emoji/unicode/2728.png?v8)
+
         Thanks for the suggestion. Please describe the scenario and expected value clearly.
   - type: textarea
     id: summary
@@ -44,4 +46,3 @@ body:
     attributes:
       label: Additional context
       description: Add links, examples, or references.
-
