@@ -83,14 +83,17 @@ jobs:
             --generate-notes \
             --verify-tag
 
-      - name: Push NuGet package to NuGet.org (Trusted Publishing via OIDC)
+      - name: NuGet login via Trusted Publishing (OIDC → temp API key)
+        if: ${{ inputs.push-to-nuget == true }}
+        id: nuget-login
+        uses: NuGet/login@v1
+        with:
+          user: ${{ secrets.NUGET_USER }}
+
+      - name: Push NuGet package to NuGet.org
         if: ${{ inputs.push-to-nuget == true }}
         run: |
-          # Strip default audience from the request URL and set 'nuget' as the sole audience
-          BASE_URL="${ACTIONS_ID_TOKEN_REQUEST_URL%%\?*}"
-          ID_TOKEN=$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "${BASE_URL}?audience=nuget" | jq -r '.value')
           dotnet nuget push artifacts/*.nupkg \
             --source https://api.nuget.org/v3/index.json \
-            --api-key "$ID_TOKEN" \
+            --api-key "${{ steps.nuget-login.outputs.NUGET_API_KEY }}" \
             --skip-duplicate
