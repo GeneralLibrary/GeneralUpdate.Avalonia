@@ -35,11 +35,11 @@ public sealed class PhysicalFileStorage : IFileStorage
         return new FileStream(filePath, mode, FileAccess.Write, FileShare.None);
     }
 
-    public Task<string?> ReadAllTextAsync(string filePath, CancellationToken cancellationToken = default)
+    public async Task<string?> ReadAllTextAsync(string filePath, CancellationToken cancellationToken = default)
     {
-        return File.Exists(filePath)
-            ? File.ReadAllTextAsync(filePath, cancellationToken)
-            : Task.FromResult<string?>(null);
+        if (!File.Exists(filePath))
+            return null;
+        return await File.ReadAllTextAsync(filePath, cancellationToken).ConfigureAwait(false);
     }
 
     public Task WriteAllTextAsync(string filePath, string content, CancellationToken cancellationToken = default)
