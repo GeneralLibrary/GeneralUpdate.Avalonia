@@ -7,6 +7,11 @@ on:
         description: 'NuGet package version (SemVer 2.0, e.g. 1.0.0, 1.0.0-beta.1)'
         required: true
         type: string
+      push-to-nuget:
+        description: 'Push package to NuGet.org'
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -34,7 +39,9 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
 
       - name: Install Android workload
         run: dotnet workload install android
@@ -77,6 +84,7 @@ jobs:
             --verify-tag
 
       - name: Push NuGet package to NuGet.org (Trusted Publishing via OIDC)
+        if: ${{ inputs.push-to-nuget == true }}
         run: |
           dotnet nuget push artifacts/*.nupkg \
             --source https://api.nuget.org/v3/index.json \
