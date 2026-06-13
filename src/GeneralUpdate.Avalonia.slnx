@@ -1,0 +1,5 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="GeneralUpdate.Avalonia.Android/GeneralUpdate.Avalonia.Android.csproj" />
+  </Folder>
+</Solution>

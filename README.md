@@ -9,7 +9,7 @@
 
 ## 项目简介
 
-`GeneralUpdate.Avalonia` 是面向 Avalonia 应用的更新能力仓库。当前核心模块为 `GeneralUpdate.Avalonia.Android`，提供 Android 平台自动更新流程编排能力（无 UI），适配 `net8.0-android`，面向 Avalonia 12+ 应用。
+`GeneralUpdate.Avalonia` 是面向 Avalonia 应用的更新能力仓库。当前核心模块为 `GeneralUpdate.Avalonia.Android`，提供 Android 平台自动更新流程编排能力（无 UI），适配 `net10.0-android`，面向 Avalonia 12+ 应用。
 
 项目将更新流程拆分为可组合的抽象接口，便于在不同业务场景下替换版本比较、下载、哈希校验、安装拉起、日志与事件分发实现。
 
@@ -25,8 +25,8 @@
 
 ### 环境准备
 
-- .NET SDK：`8.0+`
-- 平台：`Android (net8.0-android)`
+- .NET SDK：`10.0+`
+- 平台：`Android (net10.0-android)`
 - Avalonia：`12+`
 - Git：`2.30+`
 

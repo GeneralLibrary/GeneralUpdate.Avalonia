@@ -51,4 +51,7 @@ CodeCoverage/
 # NUnit
 *.VisualState.xml
 TestResult.xml
-nunit-*.xml
+nunit-*.xmlsrc/.idea/
+
+# JetBrains Rider
+.idea/
