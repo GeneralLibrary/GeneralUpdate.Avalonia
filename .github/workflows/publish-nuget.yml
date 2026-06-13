@@ -7,14 +7,10 @@ on:
         description: 'NuGet package version (SemVer 2.0, e.g. 1.0.0, 1.0.0-beta.1)'
         required: true
         type: string
-      push-to-nuget:
-        description: 'Push package to NuGet.org'
-        required: false
-        type: boolean
-        default: true
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   publish:
@@ -77,10 +73,8 @@ jobs:
             --notes "Release of GeneralUpdate.Avalonia version **${{ inputs.version }}**" \
             --verify-tag
 
-      - name: Push NuGet package
-        if: ${{ inputs.push-to-nuget == true }}
+      - name: Push NuGet package to NuGet.org (Trusted Publishing via OIDC)
         run: |
           dotnet nuget push artifacts/*.nupkg \
-            --api-key ${{ secrets.NUGET_API_KEY }} \
             --source https://api.nuget.org/v3/index.json \
             --skip-duplicate
