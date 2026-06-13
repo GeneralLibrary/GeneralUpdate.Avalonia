@@ -70,11 +70,11 @@ jobs:
           gh release create "$TAG" \
             artifacts/*.nupkg \
             --title "$TAG" \
-            --notes "Release of GeneralUpdate.Avalonia version **${{ inputs.version }}**" \
+            --generate-notes \
             --verify-tag || \
           gh release edit "$TAG" \
             --title "$TAG" \
-            --notes "Release of GeneralUpdate.Avalonia version **${{ inputs.version }}**"
+            --generate-notes
 
       - name: Push NuGet package to NuGet.org (Trusted Publishing via OIDC)
         run: |
