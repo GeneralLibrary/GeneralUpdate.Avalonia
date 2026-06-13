@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="src/GeneralUpdate.Avalonia.Android/GeneralUpdate.Avalonia.Android.csproj" />
+  <Project Path="tests/GeneralUpdate.Avalonia.Android.Tests/GeneralUpdate.Avalonia.Android.Tests.csproj" />
+</Solution>

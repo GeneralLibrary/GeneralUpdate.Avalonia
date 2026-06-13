@@ -1,0 +1,86 @@
+name: Publish NuGet
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'NuGet package version (SemVer 2.0, e.g. 1.0.0, 1.0.0-beta.1)'
+        required: true
+        type: string
+      push-to-nuget:
+        description: 'Push package to NuGet.org'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: Build and Publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate SemVer 2.0
+        run: |
+          if ! echo "${{ inputs.version }}" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$' > /dev/null; then
+            echo "::error::Invalid SemVer 2.0 version: '${{ inputs.version }}'"
+            exit 1
+          fi
+          echo "Version ${{ inputs.version }} is valid SemVer 2.0"
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Install Android workload
+        run: dotnet workload install android
+
+      - name: Restore
+        run: dotnet restore GeneralUpdate.Avalonia.slnx
+
+      - name: Build
+        run: dotnet build GeneralUpdate.Avalonia.slnx --configuration Release --no-restore /p:Version=${{ inputs.version }}
+
+      - name: Run tests
+        run: dotnet test GeneralUpdate.Avalonia.slnx --configuration Release --no-restore --no-build /p:Version=${{ inputs.version }}
+
+      - name: Pack NuGet
+        run: dotnet pack GeneralUpdate.Avalonia.slnx --configuration Release --no-restore --no-build -o artifacts /p:Version=${{ inputs.version }}
+
+      - name: List artifacts
+        run: ls -la artifacts/
+
+      - name: Create git tag
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          TAG="v${{ inputs.version }}"
+          git tag "$TAG"
+          git push origin "$TAG"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v${{ inputs.version }}"
+          gh release create "$TAG" \
+            artifacts/*.nupkg \
+            --title "$TAG" \
+            --notes "Release of GeneralUpdate.Avalonia version **${{ inputs.version }}**" \
+            --verify-tag
+
+      - name: Push NuGet package
+        if: ${{ inputs.push-to-nuget == true }}
+        run: |
+          dotnet nuget push artifacts/*.nupkg \
+            --api-key ${{ secrets.NUGET_API_KEY }} \
+            --source https://api.nuget.org/v3/index.json \
+            --skip-duplicate

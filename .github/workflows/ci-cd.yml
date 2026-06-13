@@ -23,10 +23,12 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
 
-      - name: Restore test project
-        run: dotnet restore tests/GeneralUpdate.Avalonia.Android.Tests/GeneralUpdate.Avalonia.Android.Tests.csproj
+      - name: Restore
+        run: dotnet restore GeneralUpdate.Avalonia.slnx
 
       - name: Run unit tests
         run: dotnet test tests/GeneralUpdate.Avalonia.Android.Tests/GeneralUpdate.Avalonia.Android.Tests.csproj --configuration Release --no-restore
@@ -43,13 +45,15 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
 
       - name: Install Android workload
         run: dotnet workload install android
 
-      - name: Restore Android project
-        run: dotnet restore src/GeneralUpdate.Avalonia.Android/GeneralUpdate.Avalonia.Android.csproj
+      - name: Restore
+        run: dotnet restore GeneralUpdate.Avalonia.slnx
 
       - name: Build Android project
         run: dotnet build src/GeneralUpdate.Avalonia.Android/GeneralUpdate.Avalonia.Android.csproj --configuration Release --no-restore
