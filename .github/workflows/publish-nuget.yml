@@ -86,8 +86,10 @@ jobs:
       - name: Push NuGet package to NuGet.org (Trusted Publishing via OIDC)
         if: ${{ inputs.push-to-nuget == true }}
         run: |
+          # Strip default audience from the request URL and set 'nuget' as the sole audience
+          BASE_URL="${ACTIONS_ID_TOKEN_REQUEST_URL%%\?*}"
           ID_TOKEN=$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=nuget" | jq -r '.value')
+            "${BASE_URL}?audience=nuget" | jq -r '.value')
           dotnet nuget push artifacts/*.nupkg \
             --source https://api.nuget.org/v3/index.json \
             --api-key "$ID_TOKEN" \
