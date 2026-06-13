@@ -25,8 +25,8 @@
 
 ### 环境准备
 
-- .NET SDK：`8.0+`
-- 平台：`Android (net8.0-android)`
+- .NET SDK：`8.0+`（推荐 `10.0+`）
+- 平台：`Android (net10.0-android)` 或 `net8.0-android`
 - Avalonia：`12+`
 - Git：`2.30+`
 
