@@ -1,9 +1,11 @@
 <Project>
   <PropertyGroup>
-    <Version Condition="'$(Version)' == ''">0.0.0-dev</Version>
-    <AssemblyVersion Condition="'$(AssemblyVersion)' == ''">$(Version)</AssemblyVersion>
-    <FileVersion Condition="'$(FileVersion)' == ''">$(Version)</FileVersion>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <RepositoryType>git</RepositoryType>
+  </PropertyGroup>
+
+  <!-- Default version for packable projects only -->
+  <PropertyGroup Condition="'$(IsPackable)' != 'false'">
+    <Version Condition="'$(Version)' == ''">0.0.0-dev</Version>
   </PropertyGroup>
 </Project>
