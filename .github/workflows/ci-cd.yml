@@ -27,8 +27,8 @@ jobs:
             8.0.x
             10.0.x
 
-      - name: Restore
-        run: dotnet restore GeneralUpdate.Avalonia.slnx
+      - name: Restore test project
+        run: dotnet restore tests/GeneralUpdate.Avalonia.Android.Tests/GeneralUpdate.Avalonia.Android.Tests.csproj
 
       - name: Run unit tests
         run: dotnet test tests/GeneralUpdate.Avalonia.Android.Tests/GeneralUpdate.Avalonia.Android.Tests.csproj --configuration Release --no-restore
