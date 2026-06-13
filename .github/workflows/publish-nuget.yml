@@ -59,8 +59,8 @@ jobs:
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           TAG="v${{ inputs.version }}"
-          git tag "$TAG"
-          git push origin "$TAG"
+          git tag --force "$TAG"
+          git push --force origin "$TAG"
 
       - name: Create GitHub Release
         env:
@@ -71,7 +71,10 @@ jobs:
             artifacts/*.nupkg \
             --title "$TAG" \
             --notes "Release of GeneralUpdate.Avalonia version **${{ inputs.version }}**" \
-            --verify-tag
+            --verify-tag || \
+          gh release edit "$TAG" \
+            --title "$TAG" \
+            --notes "Release of GeneralUpdate.Avalonia version **${{ inputs.version }}**"
 
       - name: Push NuGet package to NuGet.org (Trusted Publishing via OIDC)
         run: |
