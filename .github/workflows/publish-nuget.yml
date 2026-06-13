@@ -83,33 +83,17 @@ jobs:
             --generate-notes \
             --verify-tag
 
-      - name: Push NuGet package to NuGet.org (Trusted Publishing via OIDC)
+      - name: NuGet login via Trusted Publishing (OIDC → temp API key)
+        if: ${{ inputs.push-to-nuget == true }}
+        id: nuget-login
+        uses: NuGet/login@v1
+        with:
+          user: juster.chu
+
+      - name: Push NuGet package to NuGet.org
         if: ${{ inputs.push-to-nuget == true }}
         run: |
-          # Step 1: Get OIDC token from GitHub Actions runtime
-          ID_TOKEN=$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https://www.nuget.org" | jq -r '.value')
-          echo "OIDC token obtained (length: ${#ID_TOKEN})"
-
-          # Step 2: Exchange OIDC token for a short-lived NuGet API key
-          echo "Exchanging token at https://www.nuget.org/api/v2/token..."
-          RESPONSE=$(curl -sSL -w "\n%{http_code}" -X POST "https://www.nuget.org/api/v2/token" \
-            -H "Content-Type: application/json" \
-            -d "{\"token\":\"$ID_TOKEN\",\"username\":\"juster.chu\"}")
-          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          RESPONSE_BODY=$(echo "$RESPONSE" | sed '$d')
-          echo "HTTP Status: $HTTP_CODE"
-          echo "Response: $RESPONSE_BODY"
-
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "::error::Token exchange failed with HTTP $HTTP_CODE"
-            exit 1
-          fi
-
-          NUGET_API_KEY=$(echo "$RESPONSE_BODY" | jq -r '.apiKey')
-
-          # Step 3: Push the package
           dotnet nuget push artifacts/*.nupkg \
             --source https://api.nuget.org/v3/index.json \
-            --api-key "$NUGET_API_KEY" \
+            --api-key "${{ steps.nuget-login.outputs.NUGET_API_KEY }}" \
             --skip-duplicate
