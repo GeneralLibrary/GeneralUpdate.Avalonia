@@ -18,7 +18,7 @@ public sealed record UpdatePackageInfo
     /// Per-package authentication scheme.
     /// When set, takes precedence over the global <see cref="HttpDownloadOptions.AuthProvider"/>.
     /// </summary>
-    public Enums.AuthScheme? AuthScheme { get; init; }
+    public AuthScheme? AuthScheme { get; init; }
 
     /// <summary>
     /// Token value used by Bearer or ApiKey authentication.

@@ -34,6 +34,7 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
         _logger = logger ?? new NoOpUpdateLogger();
         _httpOptions = null;
         _globalAuthProvider = null;
+        _ownsClient = false;
     }
 
     /// <summary>
@@ -48,7 +49,11 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
         _logger = logger ?? new NoOpUpdateLogger();
 
         var handler = httpOptions.BuildHandler();
-        _httpClient = new HttpClient(handler, disposeHandler: true);
+        _httpClient = new HttpClient(handler, disposeHandler: true)
+        {
+            // Timeout is managed per-request via CancellationTokenSource linked to DownloadTimeout
+            Timeout = System.Threading.Timeout.InfiniteTimeSpan
+        };
         _globalAuthProvider = httpOptions.AuthProvider;
         _ownsClient = true;
     }
@@ -84,9 +89,18 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
                 : null;
             var effectiveCt = linkedCts?.Token ?? cancellationToken;
 
+            // Use RequestTimeout for the HEAD probe (quick server info check)
+            using var probeCts = _httpOptions != null
+                ? new CancellationTokenSource(_httpOptions.RequestTimeout)
+                : null;
+            using var probeLinkedCts = probeCts != null
+                ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, probeCts.Token)
+                : null;
+            var probeCt = probeLinkedCts?.Token ?? cancellationToken;
+
             var remoteInfo = await WithRetryAsync(
                 ct => GetRemoteInfoAsync(packageInfo, ct),
-                effectiveCt).ConfigureAwait(false);
+                probeCt).ConfigureAwait(false);
             var expectedMetadata = CreateMetadata(packageInfo, finalName, remoteInfo);
 
             var canResume = await EnsureResumeConsistencyAsync(tempFilePath, sidecarPath, expectedMetadata, cancellationToken).ConfigureAwait(false);
@@ -250,8 +264,14 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
                 packageInfo.BasicUsername,
                 packageInfo.BasicPassword);
         }
-        else if (_globalAuthProvider != null)
+
+        // Fall back to global auth when per-package is not set or not configured
+        if ((provider is null || provider is NoOpAuthProvider) && _globalAuthProvider != null)
         {
+            if (packageInfo.AuthScheme.HasValue)
+            {
+                _logger.LogWarning($"AuthScheme '{packageInfo.AuthScheme}' is set but credentials are missing. Falling back to global auth provider.");
+            }
             provider = _globalAuthProvider;
         }
 
