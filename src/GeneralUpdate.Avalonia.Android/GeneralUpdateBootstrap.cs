@@ -14,7 +14,8 @@ public static class GeneralUpdateBootstrap
         HttpClient? httpClient = null,
         IVersionComparer? versionComparer = null,
         IUpdateEventDispatcher? eventDispatcher = null,
-        IUpdateLogger? logger = null)
+        IUpdateLogger? logger = null,
+        HttpDownloadOptions? httpOptions = null)
     {
         var usedContextProvider = contextProvider ?? new DefaultAndroidContextProvider();
         var context = usedContextProvider.GetContext();
@@ -32,9 +33,22 @@ public static class GeneralUpdateBootstrap
         var effectiveOptions = options with { DownloadDirectoryPath = effectiveDownloadDirectory };
         var usedLogger = logger ?? new NoOpUpdateLogger();
         var usedStorage = new PhysicalFileStorage();
-        var usedClient = httpClient ?? new HttpClient();
 
-        var downloader = new HttpResumableApkDownloader(usedClient, usedStorage, effectiveOptions, usedLogger);
+        HttpResumableApkDownloader downloader;
+        if (httpOptions != null)
+        {
+            // Use internal constructor that builds HttpClient from HttpDownloadOptions
+            // (SSL validation, proxy, auth, timeouts)
+            downloader = new HttpResumableApkDownloader(
+                usedStorage, effectiveOptions, httpOptions, usedLogger);
+        }
+        else
+        {
+            // Legacy path: use injected httpClient or a bare new one
+            var usedClient = httpClient ?? new HttpClient();
+            downloader = new HttpResumableApkDownloader(
+                usedClient, usedStorage, effectiveOptions, usedLogger);
+        }
         var validator = new Sha256HashValidator();
         var installer = new AndroidApkInstaller(
             usedContextProvider,

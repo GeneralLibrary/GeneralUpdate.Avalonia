@@ -282,6 +282,12 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
         }
 
         _operationGate.Dispose();
+
+        if (_downloader is IDisposable disposableDownloader)
+        {
+            disposableDownloader.Dispose();
+        }
+
         _disposed = true;
     }
 
