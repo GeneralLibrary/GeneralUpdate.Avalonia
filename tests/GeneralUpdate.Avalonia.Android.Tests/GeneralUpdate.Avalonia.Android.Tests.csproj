@@ -22,6 +22,7 @@
     <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Abstractions/IUpdateEventDispatcher.cs" Link="Source/Abstractions/IUpdateEventDispatcher.cs" />
     <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Abstractions/IUpdateLogger.cs" Link="Source/Abstractions/IUpdateLogger.cs" />
     <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Abstractions/IVersionComparer.cs" Link="Source/Abstractions/IVersionComparer.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Enums/AuthScheme.cs" Link="Source/Enums/AuthScheme.cs" />
     <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Enums/UpdateFailureReason.cs" Link="Source/Enums/UpdateFailureReason.cs" />
     <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Enums/UpdateState.cs" Link="Source/Enums/UpdateState.cs" />
     <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Events/DownloadProgressChangedEventArgs.cs" Link="Source/Events/DownloadProgressChangedEventArgs.cs" />

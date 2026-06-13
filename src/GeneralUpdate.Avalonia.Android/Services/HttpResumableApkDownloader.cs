@@ -3,11 +3,12 @@ using System.Net.Http.Headers;
 using System.Diagnostics;
 using System.Text.Json;
 using GeneralUpdate.Avalonia.Android.Abstractions;
+using GeneralUpdate.Avalonia.Android.Enums;
 using GeneralUpdate.Avalonia.Android.Models;
 
 namespace GeneralUpdate.Avalonia.Android.Services;
 
-public sealed class HttpResumableApkDownloader : IUpdateDownloader
+public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
 {
     private static readonly HashSet<char> InvalidFileNameChars = Path.GetInvalidFileNameChars().ToHashSet();
 
@@ -17,12 +18,44 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader
     private readonly IUpdateLogger _logger;
     private readonly JsonSerializerOptions _jsonOptions = new() { PropertyNameCaseInsensitive = true };
 
+    private readonly HttpDownloadOptions? _httpOptions;
+    private readonly IHttpAuthProvider? _globalAuthProvider;
+    private readonly bool _ownsClient;
+
+    /// <summary>
+    /// Creates a downloader with an externally-provided HttpClient.
+    /// No authentication or custom HTTP options are applied.
+    /// </summary>
     public HttpResumableApkDownloader(HttpClient httpClient, IFileStorage fileStorage, AndroidUpdateOptions options, IUpdateLogger? logger = null)
     {
-        _httpClient = httpClient;
-        _fileStorage = fileStorage;
-        _options = options;
+        _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
+        _fileStorage = fileStorage ?? throw new ArgumentNullException(nameof(fileStorage));
+        _options = options ?? throw new ArgumentNullException(nameof(options));
         _logger = logger ?? new NoOpUpdateLogger();
+        _httpOptions = null;
+        _globalAuthProvider = null;
+        _ownsClient = false;
+    }
+
+    /// <summary>
+    /// Creates a downloader with HTTP options that configure SSL, proxy, auth, and timeouts.
+    /// The HttpClient is constructed internally from the provided options.
+    /// </summary>
+    internal HttpResumableApkDownloader(IFileStorage fileStorage, AndroidUpdateOptions options, HttpDownloadOptions httpOptions, IUpdateLogger? logger = null)
+    {
+        _fileStorage = fileStorage ?? throw new ArgumentNullException(nameof(fileStorage));
+        _options = options ?? throw new ArgumentNullException(nameof(options));
+        _httpOptions = httpOptions ?? throw new ArgumentNullException(nameof(httpOptions));
+        _logger = logger ?? new NoOpUpdateLogger();
+
+        var handler = httpOptions.BuildHandler();
+        _httpClient = new HttpClient(handler, disposeHandler: true)
+        {
+            // Timeout is managed per-request via CancellationTokenSource linked to DownloadTimeout
+            Timeout = System.Threading.Timeout.InfiniteTimeSpan
+        };
+        _globalAuthProvider = httpOptions.AuthProvider;
+        _ownsClient = true;
     }
 
     public async Task<DownloadResult> DownloadAsync(UpdatePackageInfo packageInfo, Action<DownloadProgressInfo>? progressCallback, CancellationToken cancellationToken = default)
@@ -47,7 +80,27 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader
             var tempFilePath = finalFilePath + _options.TemporaryFileExtension;
             var sidecarPath = tempFilePath + _options.SidecarExtension;
 
-            var remoteInfo = await GetRemoteInfoAsync(packageInfo.DownloadUrl, cancellationToken).ConfigureAwait(false);
+            // Resolve download timeout: use configured value or infinite
+            using var timeoutCts = _httpOptions != null
+                ? new CancellationTokenSource(_httpOptions.DownloadTimeout)
+                : null;
+            using var linkedCts = timeoutCts != null
+                ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token)
+                : null;
+            var effectiveCt = linkedCts?.Token ?? cancellationToken;
+
+            // Use RequestTimeout for the HEAD probe (quick server info check)
+            using var probeCts = _httpOptions != null
+                ? new CancellationTokenSource(_httpOptions.RequestTimeout)
+                : null;
+            using var probeLinkedCts = probeCts != null
+                ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, probeCts.Token)
+                : null;
+            var probeCt = probeLinkedCts?.Token ?? cancellationToken;
+
+            var remoteInfo = await WithRetryAsync(
+                ct => GetRemoteInfoAsync(packageInfo, ct),
+                probeCt).ConfigureAwait(false);
             var expectedMetadata = CreateMetadata(packageInfo, finalName, remoteInfo);
 
             var canResume = await EnsureResumeConsistencyAsync(tempFilePath, sidecarPath, expectedMetadata, cancellationToken).ConfigureAwait(false);
@@ -65,7 +118,9 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader
                 request.Headers.Range = new RangeHeaderValue(existingLength, null);
             }
 
-            using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+            await ApplyAuthAsync(request, packageInfo, effectiveCt).ConfigureAwait(false);
+
+            using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, effectiveCt).ConfigureAwait(false);
             if (existingLength > 0 && response.StatusCode == HttpStatusCode.OK)
             {
                 _logger.LogWarning("Server did not honor range request. Restarting download from zero.");
@@ -84,7 +139,7 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader
 
             await _fileStorage.WriteAllTextAsync(sidecarPath, JsonSerializer.Serialize(metadataWithResponse), cancellationToken).ConfigureAwait(false);
 
-            await using var contentStream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            await using var contentStream = await response.Content.ReadAsStreamAsync(effectiveCt).ConfigureAwait(false);
             await using var fileStream = _fileStorage.OpenWrite(tempFilePath, append: existingLength > 0);
 
             var buffer = new byte[_options.DownloadBufferSize];
@@ -95,7 +150,7 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader
 
             while (true)
             {
-                var read = await contentStream.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken).ConfigureAwait(false);
+                var read = await contentStream.ReadAsync(buffer.AsMemory(0, buffer.Length), effectiveCt).ConfigureAwait(false);
                 if (read <= 0)
                 {
                     break;
@@ -177,9 +232,10 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader
         }
     }
 
-    private async Task<(string? ETag, string? LastModified, long? ContentLength, bool AcceptRanges)> GetRemoteInfoAsync(string downloadUrl, CancellationToken cancellationToken)
+    private async Task<(string? ETag, string? LastModified, long? ContentLength, bool AcceptRanges)> GetRemoteInfoAsync(UpdatePackageInfo packageInfo, CancellationToken cancellationToken)
     {
-        using var headRequest = new HttpRequestMessage(HttpMethod.Head, downloadUrl);
+        using var headRequest = new HttpRequestMessage(HttpMethod.Head, packageInfo.DownloadUrl);
+        await ApplyAuthAsync(headRequest, packageInfo, cancellationToken).ConfigureAwait(false);
         using var headResponse = await _httpClient.SendAsync(headRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
         if (!headResponse.IsSuccessStatusCode)
         {
@@ -193,6 +249,78 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader
             headResponse.Content.Headers.ContentLength,
             acceptRanges);
     }
+
+    private async Task ApplyAuthAsync(HttpRequestMessage request, UpdatePackageInfo packageInfo, CancellationToken cancellationToken)
+    {
+        IHttpAuthProvider? provider = null;
+
+        // Per-package auth takes precedence
+        if (packageInfo.AuthScheme.HasValue)
+        {
+            provider = HttpAuthProviderFactory.Create(
+                packageInfo.AuthScheme.Value,
+                packageInfo.AuthToken,
+                packageInfo.AuthSecretKey,
+                packageInfo.BasicUsername,
+                packageInfo.BasicPassword);
+        }
+
+        // Fall back to global auth when per-package is not set or not configured
+        if ((provider is null || provider is NoOpAuthProvider) && _globalAuthProvider != null)
+        {
+            if (packageInfo.AuthScheme.HasValue)
+            {
+                _logger.LogWarning($"AuthScheme '{packageInfo.AuthScheme}' is set but credentials are missing. Falling back to global auth provider.");
+            }
+            provider = _globalAuthProvider;
+        }
+
+        if (provider != null)
+        {
+            await provider.ApplyAuthAsync(request, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task<T> WithRetryAsync<T>(Func<CancellationToken, Task<T>> action, CancellationToken cancellationToken)
+    {
+        if (_httpOptions == null || _httpOptions.MaxRetryAttempts <= 1)
+        {
+            return await action(cancellationToken).ConfigureAwait(false);
+        }
+
+        var maxAttempts = _httpOptions.MaxRetryAttempts;
+
+        for (var attempt = 0; ; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            try
+            {
+                return await action(cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (attempt < maxAttempts - 1 && IsTransient(ex))
+            {
+                var delay = TimeSpan.FromMilliseconds(
+                    _httpOptions.RetryBaseDelay.TotalMilliseconds * Math.Pow(2, attempt));
+                _logger.LogWarning($"Download attempt {attempt + 1} failed with transient error. Retrying in {delay.TotalMilliseconds}ms. {ex.GetType().Name}: {ex.Message}");
+                await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private static bool IsTransient(Exception ex) => ex switch
+    {
+        TimeoutException => true,
+        OperationCanceledException => false,
+        IOException ioe when ioe.InnerException is TimeoutException => true,
+        HttpRequestException hre => hre.StatusCode is
+            HttpStatusCode.RequestTimeout or
+            HttpStatusCode.InternalServerError or
+            HttpStatusCode.BadGateway or
+            HttpStatusCode.ServiceUnavailable or
+            HttpStatusCode.GatewayTimeout,
+        _ => false
+    };
 
     private async Task<bool> EnsureResumeConsistencyAsync(
         string tempFilePath,
@@ -313,6 +441,14 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader
         }
 
         return sanitized;
+    }
+
+    public void Dispose()
+    {
+        if (_ownsClient)
+        {
+            _httpClient.Dispose();
+        }
     }
 
     private sealed class SmoothedSpeedMeter
