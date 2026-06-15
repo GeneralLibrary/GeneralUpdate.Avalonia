@@ -7,6 +7,8 @@
 
 ---
 
+![](./imgs/banner.png)
+
 ## 项目简介
 
 `GeneralUpdate.Avalonia` 是面向 Avalonia 应用的更新能力仓库。当前核心模块为 `GeneralUpdate.Avalonia.Android`，提供 Android 平台自动更新流程编排能力（无 UI），适配 `net10.0-android`，面向 Avalonia 12+ 应用。

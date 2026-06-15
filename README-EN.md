@@ -7,6 +7,8 @@
 
 ---
 
+![](./imgs/banner.png)
+
 ## Introduction
 
 `GeneralUpdate.Avalonia` is a repository focused on update capabilities for Avalonia applications. Its current core module, `GeneralUpdate.Avalonia.Android`, provides a UI-free Android auto-update pipeline targeting `net8.0-android` for Avalonia 12+ apps.
