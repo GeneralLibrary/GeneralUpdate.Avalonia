@@ -47,6 +47,107 @@ public sealed class AndroidBootstrapTests
     }
 
     [Fact]
+    public async Task ValidateAsync_WhenPrecheckReturnsTrue_SkipsUpdateAndDoesNotRaiseValidate()
+    {
+        var bootstrap = CreateBootstrap();
+        var packageInfo = CreatePackageInfo(version: "1.2.0");
+        UpdateInfoEventArgs? precheckArgs = null;
+        var validateRaised = false;
+
+        bootstrap.AddListenerValidate += (_, _) => validateRaised = true;
+        bootstrap.AddListenerUpdatePrecheck(args =>
+        {
+            precheckArgs = args;
+            return true;
+        });
+
+        var result = await bootstrap.ValidateAsync(packageInfo, "1.0.0");
+
+        Assert.True(result.Success);
+        Assert.False(result.UpdateFound);
+        Assert.Equal(UpdateState.Completed, result.State);
+        Assert.False(validateRaised);
+        Assert.NotNull(precheckArgs);
+        Assert.Equal(packageInfo, precheckArgs!.PackageInfo);
+        Assert.Equal("1.0.0", precheckArgs.CurrentVersion);
+        Assert.Equal("1.2.0", precheckArgs.Result.TargetVersion);
+        Assert.True(precheckArgs.Result.UpdateFound);
+        Assert.Equal(UpdateState.Completed, bootstrap.GetSnapshot().State);
+    }
+
+    [Fact]
+    public async Task ValidateAsync_WhenPrecheckReturnsFalse_ProceedsWithUpdate()
+    {
+        var bootstrap = CreateBootstrap();
+        var packageInfo = CreatePackageInfo(version: "1.2.0");
+        var calls = 0;
+        UpdateInfoEventArgs? precheckArgs = null;
+
+        bootstrap.AddListenerUpdatePrecheck(args =>
+        {
+            calls++;
+            precheckArgs = args;
+            return false;
+        });
+
+        var result = await bootstrap.ValidateAsync(packageInfo, "1.0.0");
+
+        Assert.True(result.UpdateFound);
+        Assert.Equal(UpdateState.UpdateAvailable, result.State);
+        Assert.Equal(1, calls);
+        Assert.NotNull(precheckArgs);
+        Assert.Equal("1.2.0", precheckArgs!.Result.TargetVersion);
+    }
+
+    [Fact]
+    public async Task ValidateAsync_WhenUpdateIsForced_DoesNotInvokePrecheck()
+    {
+        var bootstrap = CreateBootstrap();
+        var packageInfo = CreatePackageInfo(version: "1.2.0") with { IsForced = true };
+        var calls = 0;
+
+        bootstrap.AddListenerUpdatePrecheck(_ =>
+        {
+            calls++;
+            return true;
+        });
+
+        var result = await bootstrap.ValidateAsync(packageInfo, "1.0.0");
+
+        Assert.True(result.UpdateFound);
+        Assert.Equal(UpdateState.UpdateAvailable, result.State);
+        Assert.Equal(0, calls);
+    }
+
+    [Fact]
+    public async Task ValidateAsync_WhenNoUpdate_DoesNotInvokePrecheck()
+    {
+        var bootstrap = CreateBootstrap();
+        var packageInfo = CreatePackageInfo(version: "1.0.0");
+        var calls = 0;
+
+        bootstrap.AddListenerUpdatePrecheck(_ =>
+        {
+            calls++;
+            return true;
+        });
+
+        var result = await bootstrap.ValidateAsync(packageInfo, "1.0.0");
+
+        Assert.False(result.UpdateFound);
+        Assert.Equal(UpdateState.Completed, result.State);
+        Assert.Equal(0, calls);
+    }
+
+    [Fact]
+    public void AddListenerUpdatePrecheck_WhenNull_Throws()
+    {
+        var bootstrap = CreateBootstrap();
+
+        Assert.Throws<ArgumentNullException>(() => bootstrap.AddListenerUpdatePrecheck(null!));
+    }
+
+    [Fact]
     public async Task DownloadAndVerifyAsync_WhenSuccess_RaisesProgressAndCompleted()
     {
         var tempPath = Path.Combine(Path.GetTempPath(), $"gu-{Guid.NewGuid():N}.apk");

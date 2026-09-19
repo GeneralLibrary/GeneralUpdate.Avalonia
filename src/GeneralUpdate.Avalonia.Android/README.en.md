@@ -57,7 +57,7 @@ if (check.UpdateFound)
 
 ### Factory
 
-`GeneralUpdateBootstrap.CreateDefault(options, contextProvider?, activityProvider?, httpClient?, versionComparer?, eventDispatcher?, logger?)`
+`GeneralUpdateBootstrap.CreateDefault(options, contextProvider?, activityProvider?, httpClient?, versionComparer?, eventDispatcher?, logger?, httpOptions?)`
 
 Default wiring:
 
@@ -89,6 +89,34 @@ Default wiring:
 | `AddListenerDownloadProgressChanged` | `DownloadProgressChangedEventArgs` |
 | `AddListenerUpdateCompleted` | `UpdateCompletedEventArgs` |
 | `AddListenerUpdateFailed` | `UpdateFailedEventArgs` |
+
+### Pre-check Hook
+
+`AddListenerUpdatePrecheck` mirrors `GeneralUpdate.Core`'s `AddListenerUpdatePrecheck` / `ClientStrategy.UseUpdatePrecheck`:
+it runs when `ValidateAsync` finds a newer version and **before** the APK is downloaded, and it hands the discovered update
+information (`UpdateInfoEventArgs`: package metadata, current version, and the `UpdateCheckResult` being produced) to your
+business logic.
+
+```csharp
+bootstrap.AddListenerUpdatePrecheck(args =>
+{
+    // args.PackageInfo    — Version / DownloadUrl / Sha256 / FileSize / IsForced / ...
+    // args.CurrentVersion — the version running on the device
+    // args.Result         — the UpdateCheckResult ValidateAsync is about to return
+
+    if (args.PackageInfo.Version == "1.2.0" && !IsWifiConnected())
+    {
+        return true; // skip: wait for Wi-Fi before pulling 1.2.0
+    }
+
+    return false;
+});
+```
+
+Return `true` to skip the update (same contract as `GeneralUpdate.Core`'s `CanSkip`), `false` to continue. A skipped update
+makes `ValidateAsync` return `UpdateFound == false` with `UpdateState.Completed` and does **not** raise
+`AddListenerValidate`, so the usual `if (check.UpdateFound) { ... }` flow stops before downloading. Forced updates
+(`UpdatePackageInfo.IsForced`) never invoke the callback.
 
 ### Model Hierarchy
 

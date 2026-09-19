@@ -18,6 +18,7 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
 
     private readonly object _sync = new();
     private UpdateStateSnapshot _snapshot = new(UpdateState.None, UpdateFailureReason.None, null);
+    private Func<UpdateInfoEventArgs, bool>? _updatePrecheck;
 
     public AndroidBootstrap(
         IVersionComparer versionComparer,
@@ -49,6 +50,13 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
         {
             return _snapshot;
         }
+    }
+
+    public IAndroidBootstrap AddListenerUpdatePrecheck(Func<UpdateInfoEventArgs, bool> func)
+    {
+        ThrowIfDisposed();
+        _updatePrecheck = func ?? throw new ArgumentNullException(nameof(func));
+        return this;
     }
 
     public async Task<UpdateCheckResult> ValidateAsync(UpdatePackageInfo packageInfo, string currentVersion, CancellationToken cancellationToken = default)
@@ -96,10 +104,7 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
 
             if (compare > 0)
             {
-                SetState(UpdateState.UpdateAvailable, UpdateFailureReason.None, "Update available.");
-                RaiseValidate(packageInfo, currentVersion);
-
-                return new UpdateCheckResult
+                var available = new UpdateCheckResult
                 {
                     Success = true,
                     UpdateFound = true,
@@ -109,6 +114,24 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
                     PackageInfo = packageInfo,
                     CurrentVersion = currentVersion
                 };
+
+                if (ShouldSkipUpdate(available, packageInfo, currentVersion))
+                {
+                    var skipped = available with
+                    {
+                        UpdateFound = false,
+                        State = UpdateState.Completed,
+                        Message = "Update skipped by pre-check callback."
+                    };
+
+                    SetState(skipped.State, skipped.FailureReason, skipped.Message);
+                    return skipped;
+                }
+
+                SetState(UpdateState.UpdateAvailable, UpdateFailureReason.None, "Update available.");
+                RaiseValidate(packageInfo, currentVersion);
+
+                return available;
             }
 
             SetState(UpdateState.Completed, UpdateFailureReason.None, "No update available.");
@@ -233,6 +256,19 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
         {
             _operationGate.Release();
         }
+    }
+
+    private bool ShouldSkipUpdate(UpdateCheckResult result, UpdatePackageInfo packageInfo, string currentVersion)
+    {
+        if (packageInfo.IsForced || _updatePrecheck is null)
+        {
+            return false;
+        }
+
+        // Same contract as GeneralUpdate.Core's ClientStrategy.CanSkip:
+        // the callback receives the discovered update information and returns
+        // true to skip the update, false to continue.
+        return _updatePrecheck(new UpdateInfoEventArgs(packageInfo, currentVersion, result));
     }
 
     private void SetState(UpdateState state, UpdateFailureReason failureReason, string? message)

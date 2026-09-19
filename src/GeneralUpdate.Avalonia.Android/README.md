@@ -80,7 +80,8 @@ public static IAndroidBootstrap CreateDefault(
     HttpClient? httpClient = null,
     IVersionComparer? versionComparer = null,
     IUpdateEventDispatcher? eventDispatcher = null,
-    IUpdateLogger? logger = null);
+    IUpdateLogger? logger = null,
+    HttpDownloadOptions? httpOptions = null);
 ```
 
 ### IAndroidBootstrap (implements IDisposable)
@@ -91,6 +92,7 @@ public static IAndroidBootstrap CreateDefault(
 | `DownloadAndVerifyAsync(packageInfo, ct)` | Resume-download APK, SHA-256 verify, fire progress/completed/failed events, return `UpdateOperationResult` |
 | `LaunchInstallerAsync(packageInfo, apkFilePath, ct)` | Launch Android `ACTION_VIEW` intent via FileProvider, return `InstallResult` |
 | `GetSnapshot()` | Thread-safe snapshot of current `(State, FailureReason, Message)` |
+| `AddListenerUpdatePrecheck(func)` | Register a pre-check callback (see below), return the bootstrap for chaining |
 
 | Event | Payload |
 |---|---|
@@ -98,6 +100,34 @@ public static IAndroidBootstrap CreateDefault(
 | `AddListenerDownloadProgressChanged` | `DownloadProgressChangedEventArgs` — speed, bytes, percentage, status |
 | `AddListenerUpdateCompleted` | `UpdateCompletedEventArgs` — `Result` (`UpdateOperationResult`) |
 | `AddListenerUpdateFailed` | `UpdateFailedEventArgs` — `Result`, `FailureReason` |
+
+### Pre-check Hook
+
+`AddListenerUpdatePrecheck` mirrors `GeneralUpdate.Core`'s `AddListenerUpdatePrecheck` / `ClientStrategy.UseUpdatePrecheck`:
+it runs when `ValidateAsync` finds a newer version and **before** the APK is downloaded, and it hands the discovered update
+information (`UpdateInfoEventArgs`: package metadata, current version, and the `UpdateCheckResult` being produced) to your
+business logic.
+
+```csharp
+bootstrap.AddListenerUpdatePrecheck(args =>
+{
+    // args.PackageInfo    — Version / DownloadUrl / Sha256 / FileSize / IsForced / ...
+    // args.CurrentVersion — the version running on the device
+    // args.Result         — the UpdateCheckResult ValidateAsync is about to return
+
+    if (args.PackageInfo.Version == "1.2.0" && !IsWifiConnected())
+    {
+        return true; // skip: wait for Wi-Fi before pulling 1.2.0
+    }
+
+    return false;
+});
+```
+
+Return `true` to skip the update (same contract as `GeneralUpdate.Core`'s `CanSkip`), `false` to continue. A skipped update
+makes `ValidateAsync` return `UpdateFound == false` with `UpdateState.Completed` and does **not** raise
+`AddListenerValidate`, so the usual `if (check.UpdateFound) { ... }` flow stops before downloading. Forced updates
+(`UpdatePackageInfo.IsForced`) never invoke the callback.
 
 ### Enums
 
@@ -161,7 +191,7 @@ Add to `AndroidManifest.xml`:
 src/GeneralUpdate.Avalonia.Android
 ├── Abstractions/         # 9 interfaces: IAndroidBootstrap, IApkInstaller, IFileStorage, …
 ├── Enums/                # UpdateState, UpdateFailureReason
-├── Events/               # 4 event arg types
+├── Events/               # 5 event arg types
 ├── Models/               # 10 model records
 ├── Services/             # 9 default implementations
 ├── GeneralUpdateBootstrap.cs   # Static factory

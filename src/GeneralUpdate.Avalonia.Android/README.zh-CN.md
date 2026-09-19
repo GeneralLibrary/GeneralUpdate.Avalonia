@@ -57,7 +57,7 @@ if (check.UpdateFound)
 
 ### 静态工厂
 
-`GeneralUpdateBootstrap.CreateDefault(options, contextProvider?, activityProvider?, httpClient?, versionComparer?, eventDispatcher?, logger?)`
+`GeneralUpdateBootstrap.CreateDefault(options, contextProvider?, activityProvider?, httpClient?, versionComparer?, eventDispatcher?, logger?, httpOptions?)`
 
 默认注入链：
 
@@ -89,6 +89,32 @@ if (check.UpdateFound)
 | `AddListenerDownloadProgressChanged` | `DownloadProgressChangedEventArgs` |
 | `AddListenerUpdateCompleted` | `UpdateCompletedEventArgs` |
 | `AddListenerUpdateFailed` | `UpdateFailedEventArgs` |
+
+### 更新前回调（Pre-check Hook）
+
+`AddListenerUpdatePrecheck` 对应 `GeneralUpdate.Core` 的 `AddListenerUpdatePrecheck` / `ClientStrategy.UseUpdatePrecheck`：
+当 `ValidateAsync` 发现更高版本时、在下载 APK **之前**触发，把获取到的更新信息（`UpdateInfoEventArgs`：包元数据、
+当前版本、即将返回的 `UpdateCheckResult`）交给业务层处理。
+
+```csharp
+bootstrap.AddListenerUpdatePrecheck(args =>
+{
+    // args.PackageInfo    — Version / DownloadUrl / Sha256 / FileSize / IsForced 等
+    // args.CurrentVersion — 设备当前版本
+    // args.Result         — ValidateAsync 即将返回的 UpdateCheckResult
+
+    if (args.PackageInfo.Version == "1.2.0" && !IsWifiConnected())
+    {
+        return true; // 跳过：等 Wi-Fi 后再拉取 1.2.0
+    }
+
+    return false;
+});
+```
+
+返回 `true` 表示跳过本次更新（与 `GeneralUpdate.Core` 的 `CanSkip` 语义一致），返回 `false` 表示继续。跳过后
+`ValidateAsync` 返回 `UpdateFound == false`、状态为 `UpdateState.Completed`，且**不会**触发 `AddListenerValidate`，
+因此常规的 `if (check.UpdateFound) { ... }` 流程不会进入下载。强制更新（`UpdatePackageInfo.IsForced`）不会调用该回调。
 
 ### 模型继承层次
 
