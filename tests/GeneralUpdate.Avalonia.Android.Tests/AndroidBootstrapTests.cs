@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Net;
+using System.Text;
 using GeneralUpdate.Avalonia.Android.Abstractions;
 using GeneralUpdate.Avalonia.Android.Events;
 using GeneralUpdate.Avalonia.Android.Models;
@@ -9,36 +11,40 @@ namespace GeneralUpdate.Avalonia.Android.Tests;
 
 public sealed class AndroidBootstrapTests
 {
+    private const string Endpoint = "https://example.com/Upgrade/Verification";
+    private static readonly string Hash = new('a', 64);
+
     [Fact]
     public async Task ValidateAsync_WhenTargetHigher_RaisesValidateAndReturnsUpdateFound()
     {
-        var bootstrap = CreateBootstrap();
-        var packageInfo = CreatePackageInfo(version: "1.2.0");
+        var bootstrap = CreateBootstrap(httpClient: CreateHttp(VerificationJson("1.2.0")));
         const string currentVersion = "1.0.0";
         ValidateEventArgs? validateArgs = null;
 
         bootstrap.AddListenerValidate += (_, args) => validateArgs = args;
 
-        var result = await bootstrap.ValidateAsync(packageInfo, currentVersion);
+        var result = await bootstrap.ValidateAsync(currentVersion);
 
         Assert.True(result.Success);
         Assert.True(result.UpdateFound);
         Assert.Equal(UpdateState.UpdateAvailable, result.State);
         Assert.NotNull(validateArgs);
         Assert.Equal(currentVersion, validateArgs!.CurrentVersion);
-        Assert.Equal(packageInfo, validateArgs.PackageInfo);
+        Assert.Equal(result.PackageInfo, validateArgs.PackageInfo);
+        Assert.Equal("1.2.0", validateArgs.PackageInfo.Version);
     }
 
     [Fact]
     public async Task ValidateAsync_WhenVersionCompareFails_RaisesFailedAndReturnsFailure()
     {
-        var bootstrap = CreateBootstrap(versionComparer: new FailingVersionComparer("bad version"));
-        var packageInfo = CreatePackageInfo(version: "invalid");
+        var bootstrap = CreateBootstrap(
+            versionComparer: new FailingVersionComparer("bad version"),
+            httpClient: CreateHttp(VerificationJson("1.2.0")));
         UpdateFailedEventArgs? failedArgs = null;
 
         bootstrap.AddListenerUpdateFailed += (_, args) => failedArgs = args;
 
-        var result = await bootstrap.ValidateAsync(packageInfo, "1.0.0");
+        var result = await bootstrap.ValidateAsync("1.0.0");
 
         Assert.False(result.Success);
         Assert.Equal(UpdateFailureReason.VersionComparisonFailed, result.FailureReason);
@@ -49,8 +55,7 @@ public sealed class AndroidBootstrapTests
     [Fact]
     public async Task ValidateAsync_WhenPrecheckReturnsTrue_SkipsUpdateAndDoesNotRaiseValidate()
     {
-        var bootstrap = CreateBootstrap();
-        var packageInfo = CreatePackageInfo(version: "1.2.0");
+        var bootstrap = CreateBootstrap(httpClient: CreateHttp(VerificationJson("1.2.0")));
         UpdateInfoEventArgs? precheckArgs = null;
         var validateRaised = false;
 
@@ -61,14 +66,14 @@ public sealed class AndroidBootstrapTests
             return true;
         });
 
-        var result = await bootstrap.ValidateAsync(packageInfo, "1.0.0");
+        var result = await bootstrap.ValidateAsync("1.0.0");
 
         Assert.True(result.Success);
         Assert.False(result.UpdateFound);
         Assert.Equal(UpdateState.Completed, result.State);
         Assert.False(validateRaised);
         Assert.NotNull(precheckArgs);
-        Assert.Equal(packageInfo, precheckArgs!.PackageInfo);
+        Assert.Equal("1.2.0", precheckArgs!.PackageInfo.Version);
         Assert.Equal("1.0.0", precheckArgs.CurrentVersion);
         Assert.Equal("1.2.0", precheckArgs.Result.TargetVersion);
         Assert.True(precheckArgs.Result.UpdateFound);
@@ -78,8 +83,7 @@ public sealed class AndroidBootstrapTests
     [Fact]
     public async Task ValidateAsync_WhenPrecheckReturnsFalse_ProceedsWithUpdate()
     {
-        var bootstrap = CreateBootstrap();
-        var packageInfo = CreatePackageInfo(version: "1.2.0");
+        var bootstrap = CreateBootstrap(httpClient: CreateHttp(VerificationJson("1.2.0")));
         var calls = 0;
         UpdateInfoEventArgs? precheckArgs = null;
 
@@ -90,7 +94,7 @@ public sealed class AndroidBootstrapTests
             return false;
         });
 
-        var result = await bootstrap.ValidateAsync(packageInfo, "1.0.0");
+        var result = await bootstrap.ValidateAsync("1.0.0");
 
         Assert.True(result.UpdateFound);
         Assert.Equal(UpdateState.UpdateAvailable, result.State);
@@ -102,8 +106,7 @@ public sealed class AndroidBootstrapTests
     [Fact]
     public async Task ValidateAsync_WhenUpdateIsForced_DoesNotInvokePrecheck()
     {
-        var bootstrap = CreateBootstrap();
-        var packageInfo = CreatePackageInfo(version: "1.2.0") with { IsForced = true };
+        var bootstrap = CreateBootstrap(httpClient: CreateHttp(VerificationJson("1.2.0", isForced: true)));
         var calls = 0;
 
         bootstrap.AddListenerUpdatePrecheck(_ =>
@@ -112,7 +115,7 @@ public sealed class AndroidBootstrapTests
             return true;
         });
 
-        var result = await bootstrap.ValidateAsync(packageInfo, "1.0.0");
+        var result = await bootstrap.ValidateAsync("1.0.0");
 
         Assert.True(result.UpdateFound);
         Assert.Equal(UpdateState.UpdateAvailable, result.State);
@@ -122,8 +125,7 @@ public sealed class AndroidBootstrapTests
     [Fact]
     public async Task ValidateAsync_WhenNoUpdate_DoesNotInvokePrecheck()
     {
-        var bootstrap = CreateBootstrap();
-        var packageInfo = CreatePackageInfo(version: "1.0.0");
+        var bootstrap = CreateBootstrap(httpClient: CreateHttp(VerificationJson("1.0.0")));
         var calls = 0;
 
         bootstrap.AddListenerUpdatePrecheck(_ =>
@@ -132,11 +134,31 @@ public sealed class AndroidBootstrapTests
             return true;
         });
 
-        var result = await bootstrap.ValidateAsync(packageInfo, "1.0.0");
+        var result = await bootstrap.ValidateAsync("1.0.0");
 
         Assert.False(result.UpdateFound);
         Assert.Equal(UpdateState.Completed, result.State);
         Assert.Equal(0, calls);
+    }
+
+    [Fact]
+    public async Task ValidateAsync_WithoutConfiguredServer_ReportsInvalidMetadata()
+    {
+        using var bootstrap = new AndroidBootstrap(
+            new SystemVersionComparer(),
+            new SuccessDownloader(),
+            new SuccessHashValidator(),
+            new SuccessInstaller(),
+            new TestFileStorage(),
+            eventDispatcher: new ImmediateEventDispatcher(),
+            logger: new NoOpUpdateLogger());
+
+        var result = await bootstrap.ValidateAsync("1.0.0");
+
+        Assert.False(result.Success);
+        Assert.False(result.UpdateFound);
+        Assert.Equal(UpdateFailureReason.InvalidMetadata, result.FailureReason);
+        Assert.Equal(UpdateState.Failed, bootstrap.GetSnapshot().State);
     }
 
     [Fact]
@@ -187,13 +209,13 @@ public sealed class AndroidBootstrapTests
     {
         var gate = new GateController();
         var downloader = new GatedTestDownloader(gate);
-        var bootstrap = CreateBootstrap(downloader: downloader);
+        var bootstrap = CreateBootstrap(downloader: downloader, httpClient: CreateHttp(VerificationJson("9.0.0")));
         var packageInfo = CreatePackageInfo();
 
         var firstTask = bootstrap.DownloadAndVerifyAsync(packageInfo);
         await gate.Started.Task.WaitAsync(TimeSpan.FromSeconds(3));
 
-        var secondTask = bootstrap.ValidateAsync(packageInfo with { Version = "9.0.0" }, "1.0.0");
+        var secondTask = bootstrap.ValidateAsync("1.0.0");
         await Task.Delay(150);
 
         Assert.False(secondTask.IsCompleted);
@@ -209,17 +231,37 @@ public sealed class AndroidBootstrapTests
         IUpdateDownloader? downloader = null,
         IHashValidator? hashValidator = null,
         IApkInstaller? installer = null,
-        IFileStorage? fileStorage = null)
+        IFileStorage? fileStorage = null,
+        HttpClient? httpClient = null)
     {
         return new AndroidBootstrap(
             versionComparer ?? new SystemVersionComparer(),
-            downloader ?? new SuccessDownloader(Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.apk")),
+            downloader ?? new SuccessDownloader(),
             hashValidator ?? new SuccessHashValidator(),
             installer ?? new SuccessInstaller(),
             fileStorage ?? new TestFileStorage(),
             eventDispatcher: new ImmediateEventDispatcher(),
-            logger: new NoOpUpdateLogger());
+            logger: new NoOpUpdateLogger(),
+            updateServer: new UpdateServerOptions { RequestUrl = Endpoint },
+            httpClient: httpClient ?? CreateHttp("{\"code\":200,\"body\":[]}"));
     }
+
+    /// <summary>
+    /// Builds a GeneralUpdate <c>/Upgrade/Verification</c> response carrying a single full APK.
+    /// </summary>
+    private static string VerificationJson(string version, bool isForced = false) =>
+        $$"""
+        {"code":200,"body":[
+          {"version":"{{version}}","name":"Release","updateLog":"Fixes","format":".apk",
+           "url":"https://example.com/app.apk","hash":"{{Hash}}","size":10,"isForcibly":{{(isForced ? "true" : "false")}}}
+        ]}
+        """;
+
+    private static HttpClient CreateHttp(string json) =>
+        new(new TestHandler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json")
+        })));
 
     private static UpdatePackageInfo CreatePackageInfo(string version = "1.1.0", string sha256 = "abc")
     {
@@ -233,6 +275,12 @@ public sealed class AndroidBootstrapTests
         };
     }
 
+    private sealed class TestHandler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            send(request, cancellationToken);
+    }
+
     private sealed class FailingVersionComparer(string error) : IVersionComparer
     {
         public bool TryCompare(string currentVersion, string targetVersion, out int compareResult, out string? errorMessage)
@@ -243,7 +291,7 @@ public sealed class AndroidBootstrapTests
         }
     }
 
-    private sealed class SuccessDownloader(string filePath) : IUpdateDownloader
+    private sealed class SuccessDownloader(string? filePath = null) : IUpdateDownloader
     {
         public Task<DownloadResult> DownloadAsync(UpdatePackageInfo packageInfo, Action<DownloadProgressInfo>? progressCallback, CancellationToken cancellationToken = default)
         {
@@ -265,7 +313,7 @@ public sealed class AndroidBootstrapTests
                 FailureReason = UpdateFailureReason.None,
                 Message = "ok",
                 PackageInfo = packageInfo,
-                FilePath = filePath
+                FilePath = filePath ?? Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.apk")
             });
         }
     }

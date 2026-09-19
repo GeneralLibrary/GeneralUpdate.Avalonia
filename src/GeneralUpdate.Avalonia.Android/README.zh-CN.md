@@ -28,22 +28,22 @@ var options = new AndroidUpdateOptions
 {
     DownloadDirectoryPath = Path.Combine(
         Android.App.Application.Context.CacheDir!.AbsolutePath!, "update"),
-    FileProviderAuthority = "com.example.app.generalupdate.fileprovider"
+    FileProviderAuthority = "com.example.app.generalupdate.fileprovider",
+
+    // ValidateAsync 据此在组件内部请求服务端，调用方只需要提供当前版本
+    UpdateServer = new UpdateServerOptions
+    {
+        RequestUrl = "https://example.com/Upgrade/Verification",
+        AppKey     = "your-app-key",
+        Platform   = androidPlatformId,
+        ProductId  = "your-product-id"
+    }
 };
 
 using IAndroidBootstrap bootstrap = GeneralUpdateBootstrap.CreateDefault(options);
 
-var packageInfo = new UpdatePackageInfo
-{
-    Version     = "2.3.0",
-    DownloadUrl = "https://example.com/app-release.apk",
-    Sha256      = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    FileSize    = 52_428_800,
-    FileName    = "app-release.apk"
-};
-
-var check = await bootstrap.ValidateAsync(packageInfo, "2.2.1", CancellationToken.None);
-if (check.UpdateFound)
+var check = await bootstrap.ValidateAsync("2.2.1", CancellationToken.None);
+if (check.Success && check.UpdateFound && check.PackageInfo is { } packageInfo)
 {
     var result = await bootstrap.DownloadAndVerifyAsync(packageInfo, CancellationToken.None);
     if (result.Success && result.FilePath is not null)
@@ -76,7 +76,7 @@ if (check.UpdateFound)
 
 | 方法 | 返回类型 |
 |---|---|
-| `ValidateAsync(packageInfo, currentVersion, ct)` | `UpdateCheckResult` |
+| `ValidateAsync(currentVersion, ct)` | `UpdateCheckResult`，包含查询到的 `PackageInfo` |
 | `DownloadAndVerifyAsync(packageInfo, ct)` | `UpdateOperationResult` |
 | `LaunchInstallerAsync(packageInfo, apkFilePath, ct)` | `InstallResult` |
 | `GetSnapshot()` | `UpdateStateSnapshot` |
@@ -89,6 +89,19 @@ if (check.UpdateFound)
 | `AddListenerDownloadProgressChanged` | `DownloadProgressChangedEventArgs` |
 | `AddListenerUpdateCompleted` | `UpdateCompletedEventArgs` |
 | `AddListenerUpdateFailed` | `UpdateFailedEventArgs` |
+
+### 服务端版本校验
+
+`ValidateAsync(currentVersion, ct)` 只接收设备上已安装的版本号：组件按 `AndroidUpdateOptions.UpdateServer`
+的配置请求服务端、选出最新完整 APK 并比较版本，调用方不再需要自行构造 `UpdatePackageInfo`，
+之后的下载与安装直接使用 `check.PackageInfo`。
+
+默认使用 GeneralUpdate 验证协议（`version/appKey/appType/platform/productId` →
+`{"code":200,"body":[...]}`）；设置 `UpdateServer.UseJsonEndpoint = true` 则改为 GET 单个
+`UpdatePackageInfo` JSON。HTTP 204 或空结果表示“无更新”；请求、协议与元数据错误通过
+`UpdateCheckResult.Success`/`FailureReason` 与 `AddListenerUpdateFailed` 上报，不会触发 pre-check。
+未配置 `UpdateServer` 时调用会以 `UpdateFailureReason.InvalidMetadata` 失败。校验请求复用 `CreateDefault`
+的 `httpOptions`（`RequestTimeout`、代理、TLS、`AuthProvider`）。完整协议说明与 JSON 示例见仓库根 README。
 
 ### 更新前回调（Pre-check Hook）
 
@@ -133,9 +146,20 @@ UpdateOperationResult (基类)
 
 `UpdateFailureReason`: `None`, `NetworkError`, `Canceled`, `InvalidMetadata`, `FileIoError`, `HashMismatch`, `ServerDoesNotSupportRange`, `InstallPermissionDenied`, `InstallLaunchFailed`, `VersionComparisonFailed`, `Unknown`
 
-## Android FileProvider 配置
+## Android 接入配置
 
-添加到 `AndroidManifest.xml`：
+申报安装权限（Android 8.0+）：缺少时 `LaunchInstallerAsync` 返回 `InstallPermissionDenied`，
+需引导用户前往 `Settings.ActionManageUnknownAppSources` 后重试。
+
+```xml
+<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+```
+
+在 `AndroidManifest.xml` 中添加 FileProvider。其 `authorities` 必须与
+`AndroidUpdateOptions.FileProviderAuthority` 一致，下面的 paths 必须覆盖 `DownloadDirectoryPath`
+（默认 `<CacheDir>/update`）；不一致时返回 `InstallLaunchFailed`。建议向 `CreateDefault` 传入
+`IAndroidActivityProvider`，从当前 Activity 拉起安装器。`Success = true` 只表示安装器已拉起，
+安装完成后进程会被系统结束，请在下次启动时重新比较版本以确认结果。
 
 ```xml
 <provider

@@ -32,8 +32,32 @@ public interface IAndroidBootstrap : IDisposable
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="func"/> is null.</exception>
     IAndroidBootstrap AddListenerUpdatePrecheck(Func<UpdateInfoEventArgs, bool> func);
 
+    /// <summary>
+    /// Queries the configured update server for the newest package, compares it with
+    /// <paramref name="currentVersion"/> and runs the pre-check callback.
+    /// <para>
+    /// Package metadata is discovered internally from <see cref="AndroidUpdateOptions.UpdateServer"/>, so callers
+    /// only supply the version currently installed on the device. When an update is found, the returned
+    /// <see cref="UpdateCheckResult.PackageInfo"/> can be passed to <see cref="DownloadAndVerifyAsync"/> and
+    /// <see cref="LaunchInstallerAsync"/>.
+    /// </para>
+    /// <para>
+    /// Like <c>GeneralUpdate.Core</c>, the pre-check callback registered with
+    /// <see cref="AddListenerUpdatePrecheck"/> decides whether to continue: returning <c>true</c> skips the update
+    /// (the result carries <see cref="UpdateCheckResult.UpdateFound"/> set to <c>false</c> and state
+    /// <see cref="UpdateState.Completed"/>), returning <c>false</c> keeps it. Forced updates bypass the callback.
+    /// </para>
+    /// <para>
+    /// Server, protocol, metadata and HTTP failures are reported through
+    /// <see cref="UpdateCheckResult.Success"/>, <see cref="UpdateOperationResult.FailureReason"/> and
+    /// <see cref="AddListenerUpdateFailed"/>; when the server reports no package the call succeeds with
+    /// <see cref="UpdateCheckResult.UpdateFound"/> set to <c>false</c>.
+    /// </para>
+    /// </summary>
+    /// <param name="currentVersion">The application version currently installed on the device.</param>
+    /// <param name="cancellationToken">Cancels the server request and the validation.</param>
+    /// <returns>The validation outcome, including the discovered package metadata when an update is available.</returns>
     Task<UpdateCheckResult> ValidateAsync(
-        UpdatePackageInfo packageInfo,
         string currentVersion,
         CancellationToken cancellationToken = default);
 

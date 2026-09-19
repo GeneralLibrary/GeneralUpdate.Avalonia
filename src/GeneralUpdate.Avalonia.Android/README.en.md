@@ -28,22 +28,22 @@ var options = new AndroidUpdateOptions
 {
     DownloadDirectoryPath = Path.Combine(
         Android.App.Application.Context.CacheDir!.AbsolutePath!, "update"),
-    FileProviderAuthority = "com.example.app.generalupdate.fileprovider"
+    FileProviderAuthority = "com.example.app.generalupdate.fileprovider",
+
+    // ValidateAsync queries this server internally; callers only pass the installed version
+    UpdateServer = new UpdateServerOptions
+    {
+        RequestUrl = "https://example.com/Upgrade/Verification",
+        AppKey     = "your-app-key",
+        Platform   = androidPlatformId,
+        ProductId  = "your-product-id"
+    }
 };
 
 using IAndroidBootstrap bootstrap = GeneralUpdateBootstrap.CreateDefault(options);
 
-var packageInfo = new UpdatePackageInfo
-{
-    Version     = "2.3.0",
-    DownloadUrl = "https://example.com/app-release.apk",
-    Sha256      = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    FileSize    = 52_428_800,
-    FileName    = "app-release.apk"
-};
-
-var check = await bootstrap.ValidateAsync(packageInfo, "2.2.1", CancellationToken.None);
-if (check.UpdateFound)
+var check = await bootstrap.ValidateAsync("2.2.1", CancellationToken.None);
+if (check.Success && check.UpdateFound && check.PackageInfo is { } packageInfo)
 {
     var result = await bootstrap.DownloadAndVerifyAsync(packageInfo, CancellationToken.None);
     if (result.Success && result.FilePath is not null)
@@ -76,7 +76,7 @@ Default wiring:
 
 | Method | Returns |
 |---|---|
-| `ValidateAsync(packageInfo, currentVersion, ct)` | `UpdateCheckResult` |
+| `ValidateAsync(currentVersion, ct)` | `UpdateCheckResult` (includes the discovered `PackageInfo`) |
 | `DownloadAndVerifyAsync(packageInfo, ct)` | `UpdateOperationResult` |
 | `LaunchInstallerAsync(packageInfo, apkFilePath, ct)` | `InstallResult` |
 | `GetSnapshot()` | `UpdateStateSnapshot` |
@@ -89,6 +89,20 @@ Default wiring:
 | `AddListenerDownloadProgressChanged` | `DownloadProgressChangedEventArgs` |
 | `AddListenerUpdateCompleted` | `UpdateCompletedEventArgs` |
 | `AddListenerUpdateFailed` | `UpdateFailedEventArgs` |
+
+### Server-Driven Validation
+
+`ValidateAsync(currentVersion, ct)` only takes the version installed on the device: the component queries
+`AndroidUpdateOptions.UpdateServer`, picks the newest full APK and compares versions, so callers no longer build an
+`UpdatePackageInfo` themselves — pass `check.PackageInfo` to `DownloadAndVerifyAsync` / `LaunchInstallerAsync` afterwards.
+
+By default it POSTs the GeneralUpdate verification protocol (`version/appKey/appType/platform/productId` →
+`{"code":200,"body":[...]}`); set `UpdateServer.UseJsonEndpoint = true` to GET a single `UpdatePackageInfo` JSON document
+instead. HTTP 204 or an empty result means "no update"; transport, protocol and metadata failures are reported through
+`UpdateCheckResult.Success`/`FailureReason` and `AddListenerUpdateFailed`, and never invoke the pre-check callback. Without a
+configured `UpdateServer` the call fails with `UpdateFailureReason.InvalidMetadata`. Validation requests reuse the
+`httpOptions` passed to `CreateDefault` (`RequestTimeout`, proxy, TLS, `AuthProvider`). See the repository README for the
+full contract and the JSON payload example.
 
 ### Pre-check Hook
 
@@ -135,7 +149,20 @@ UpdateOperationResult (base)
 
 `UpdateFailureReason`: `None`, `NetworkError`, `Canceled`, `InvalidMetadata`, `FileIoError`, `HashMismatch`, `ServerDoesNotSupportRange`, `InstallPermissionDenied`, `InstallLaunchFailed`, `VersionComparisonFailed`, `Unknown`
 
-## Android FileProvider Setup
+## Android Setup and Prerequisites
+
+Declare the install permission (Android 8.0+). Without it `LaunchInstallerAsync` returns
+`InstallPermissionDenied`; guide the user to `Settings.ActionManageUnknownAppSources` and retry afterwards:
+
+```xml
+<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+```
+
+Add the FileProvider to `AndroidManifest.xml`. Its authority must equal
+`AndroidUpdateOptions.FileProviderAuthority`, and the paths below must cover `DownloadDirectoryPath`
+(defaults to `<CacheDir>/update`); a mismatch returns `InstallLaunchFailed`. Pass an `IAndroidActivityProvider`
+to `CreateDefault` to launch the installer from the current Activity. `Success = true` only means the installer
+was launched — the process is killed on completion, so re-check the version on the next launch.
 
 ```xml
 <provider

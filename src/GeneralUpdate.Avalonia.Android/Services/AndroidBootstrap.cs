@@ -1,3 +1,4 @@
+using System.Text.Json;
 using GeneralUpdate.Avalonia.Android.Abstractions;
 using GeneralUpdate.Avalonia.Android.Events;
 using GeneralUpdate.Avalonia.Android.Models;
@@ -13,6 +14,8 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
     private readonly IFileStorage _fileStorage;
     private readonly IUpdateEventDispatcher _eventDispatcher;
     private readonly IUpdateLogger _logger;
+    private readonly UpdateServerOptions? _updateServer;
+    private readonly HttpUpdatePackageClient? _packageClient;
     private readonly SemaphoreSlim _operationGate = new(1, 1);
     private bool _disposed;
 
@@ -27,7 +30,10 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
         IApkInstaller apkInstaller,
         IFileStorage fileStorage,
         IUpdateEventDispatcher? eventDispatcher = null,
-        IUpdateLogger? logger = null)
+        IUpdateLogger? logger = null,
+        UpdateServerOptions? updateServer = null,
+        HttpClient? httpClient = null,
+        HttpDownloadOptions? httpOptions = null)
     {
         _versionComparer = versionComparer ?? throw new ArgumentNullException(nameof(versionComparer));
         _downloader = downloader ?? throw new ArgumentNullException(nameof(downloader));
@@ -36,6 +42,11 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
         _fileStorage = fileStorage ?? throw new ArgumentNullException(nameof(fileStorage));
         _eventDispatcher = eventDispatcher ?? new ImmediateEventDispatcher();
         _logger = logger ?? new NoOpUpdateLogger();
+        _updateServer = updateServer;
+        if (updateServer is not null)
+        {
+            _packageClient = HttpUpdatePackageClient.Create(httpClient, httpOptions, _versionComparer);
+        }
     }
 
     public event EventHandler<ValidateEventArgs>? AddListenerValidate;
@@ -59,7 +70,7 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
         return this;
     }
 
-    public async Task<UpdateCheckResult> ValidateAsync(UpdatePackageInfo packageInfo, string currentVersion, CancellationToken cancellationToken = default)
+    public async Task<UpdateCheckResult> ValidateAsync(string currentVersion, CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
         await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -68,21 +79,71 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
             cancellationToken.ThrowIfCancellationRequested();
             SetState(UpdateState.Checking, UpdateFailureReason.None, "Checking for updates.");
 
-            if (string.IsNullOrWhiteSpace(currentVersion) || string.IsNullOrWhiteSpace(packageInfo.Version))
+            UpdatePackageInfo? packageInfo;
+            try
             {
-                var invalid = new UpdateCheckResult
+                if (string.IsNullOrWhiteSpace(currentVersion))
+                {
+                    throw new InvalidDataException("The current application version is required to query the update server.");
+                }
+
+                if (_updateServer is null || _packageClient is null)
+                {
+                    throw new InvalidDataException("Querying the update server requires AndroidUpdateOptions.UpdateServer.");
+                }
+
+                packageInfo = _updateServer.UseJsonEndpoint
+                    ? await _packageClient.GetPackageInfoAsync(_updateServer.RequestUrl, cancellationToken).ConfigureAwait(false)
+                    : await _packageClient.GetPackageInfoAsync(
+                        _updateServer.RequestUrl,
+                        new UpdatePackageRequest
+                        {
+                            Version = currentVersion,
+                            AppKey = _updateServer.AppKey,
+                            AppType = _updateServer.AppType,
+                            Platform = _updateServer.Platform,
+                            ProductId = _updateServer.ProductId
+                        },
+                        cancellationToken).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+            catch (Exception ex) when (IsQueryFailure(ex))
+            {
+                var canceled = ex is OperationCanceledException && cancellationToken.IsCancellationRequested;
+                var failure = new UpdateCheckResult
                 {
                     Success = false,
                     UpdateFound = false,
-                    State = UpdateState.Failed,
-                    FailureReason = UpdateFailureReason.InvalidMetadata,
-                    Message = "Current version or target version is empty.",
-                    PackageInfo = packageInfo,
-                    CurrentVersion = currentVersion
+                    State = canceled ? UpdateState.Canceled : UpdateState.Failed,
+                    FailureReason = canceled
+                        ? UpdateFailureReason.Canceled
+                        : ex is HttpRequestException or OperationCanceledException or IOException
+                            ? UpdateFailureReason.NetworkError
+                            : UpdateFailureReason.InvalidMetadata,
+                    Message = canceled
+                        ? "Update check canceled."
+                        : "Failed to query the update server.",
+                    CurrentVersion = currentVersion,
+                    Exception = ex
                 };
 
-                HandleFailure(invalid);
-                return invalid;
+                HandleFailure(failure);
+                return failure;
+            }
+
+            if (packageInfo is null)
+            {
+                SetState(UpdateState.Completed, UpdateFailureReason.None, "No update available.");
+
+                return new UpdateCheckResult
+                {
+                    Success = true,
+                    UpdateFound = false,
+                    State = UpdateState.Completed,
+                    FailureReason = UpdateFailureReason.None,
+                    Message = "No update available.",
+                    CurrentVersion = currentVersion
+                };
             }
 
             if (!_versionComparer.TryCompare(currentVersion, packageInfo.Version, out var compare, out var error))
@@ -258,6 +319,14 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
         }
     }
 
+    /// <summary>
+    /// Transport, protocol and metadata problems are reported as validation failures.
+    /// User cancellation is reported as a canceled state instead.
+    /// </summary>
+    private static bool IsQueryFailure(Exception ex) =>
+        ex is HttpRequestException or OperationCanceledException or JsonException or
+            InvalidDataException or IOException or ArgumentException;
+
     private bool ShouldSkipUpdate(UpdateCheckResult result, UpdatePackageInfo packageInfo, string currentVersion)
     {
         if (packageInfo.IsForced || _updatePrecheck is null)
@@ -318,6 +387,7 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
         }
 
         _operationGate.Dispose();
+        _packageClient?.Dispose();
 
         if (_downloader is IDisposable disposableDownloader)
         {
