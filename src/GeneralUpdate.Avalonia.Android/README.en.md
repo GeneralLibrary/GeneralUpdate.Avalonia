@@ -72,6 +72,12 @@ Default wiring:
 | `IApkInstaller` | `AndroidApkInstaller` |
 | `IVersionComparer` | `SystemVersionComparer` |
 
+### Query metadata before ValidateAsync
+
+`HttpUpdatePackageClient.GetPackageInfoAsync` supports GET JSON metadata and the POST GeneralUpdate verification reference protocol,
+independently of version comparison, with cancellation and existing authentication providers.
+See [examples and GeneralSpacestation compatibility](README.md#fetch-metadata-before-validation).
+
 ### IAndroidBootstrap Methods
 
 | Method | Returns |

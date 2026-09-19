@@ -140,27 +140,28 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
             await _fileStorage.WriteAllTextAsync(sidecarPath, JsonSerializer.Serialize(metadataWithResponse), cancellationToken).ConfigureAwait(false);
 
             await using var contentStream = await response.Content.ReadAsStreamAsync(effectiveCt).ConfigureAwait(false);
-            await using var fileStream = _fileStorage.OpenWrite(tempFilePath, append: existingLength > 0);
-
             var buffer = new byte[_options.DownloadBufferSize];
             var downloaded = existingLength;
             var speedMeter = new SmoothedSpeedMeter(Math.Max(3, _options.SpeedSmoothingWindowSeconds));
 
             progressCallback?.Invoke(CreateProgress(packageInfo, downloaded, totalBytes, speedMeter.GetSpeed(downloaded), existingLength > 0 ? "Resuming" : "Downloading"));
 
-            while (true)
+            await using (var fileStream = _fileStorage.OpenWrite(tempFilePath, append: existingLength > 0))
             {
-                var read = await contentStream.ReadAsync(buffer.AsMemory(0, buffer.Length), effectiveCt).ConfigureAwait(false);
-                if (read <= 0)
+                while (true)
                 {
-                    break;
+                    var read = await contentStream.ReadAsync(buffer.AsMemory(0, buffer.Length), effectiveCt).ConfigureAwait(false);
+                    if (read <= 0)
+                    {
+                        break;
+                    }
+
+                    await fileStream.WriteAsync(buffer.AsMemory(0, read), effectiveCt).ConfigureAwait(false);
+                    downloaded += read;
+                    var speed = speedMeter.GetSpeed(downloaded);
+
+                    progressCallback?.Invoke(CreateProgress(packageInfo, downloaded, totalBytes, speed, "Downloading"));
                 }
-
-                await fileStream.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
-                downloaded += read;
-                var speed = speedMeter.GetSpeed(downloaded);
-
-                progressCallback?.Invoke(CreateProgress(packageInfo, downloaded, totalBytes, speed, "Downloading"));
             }
 
             if (_fileStorage.FileExists(finalFilePath))

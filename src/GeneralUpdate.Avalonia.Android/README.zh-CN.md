@@ -72,6 +72,12 @@ if (check.UpdateFound)
 | `IApkInstaller` | `AndroidApkInstaller` |
 | `IVersionComparer` | `SystemVersionComparer` |
 
+### 在 ValidateAsync 前查询包信息
+
+`HttpUpdatePackageClient.GetPackageInfoAsync` 支持 GET 标准 JSON 元数据，以及 POST GeneralUpdate 验证协议，
+无需手动填写每次发布的 `UpdatePackageInfo`。查询与版本比较相互独立，支持取消和现有认证接口。
+参见[中文使用示例与 GeneralSpacestation 兼容性说明](../../README.md#在-validateasync-前获取服务器包信息)。
+
 ### IAndroidBootstrap 方法
 
 | 方法 | 返回类型 |

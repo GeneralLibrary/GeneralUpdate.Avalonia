@@ -58,6 +58,78 @@ if (check.UpdateFound)
 }
 ```
 
+## Fetch metadata before validation
+
+`ValidateAsync` only compares supplied versions; the pre-check hook does not query the server.
+Use `HttpUpdatePackageClient` to inspect server metadata before either operation:
+
+```csharp
+using GeneralUpdate.Avalonia.Android.Services;
+
+using var httpClient = new HttpClient();
+var packageClient = new HttpUpdatePackageClient(httpClient);
+var packageInfo = await packageClient.GetPackageInfoAsync(
+    "https://example.com/android/latest.json", ct);
+if (packageInfo is null) return;
+
+var check = await bootstrap.ValidateAsync(packageInfo, currentVersion, ct);
+if (check.Success && check.UpdateFound)
+{
+    var prepared = await bootstrap.DownloadAndVerifyAsync(packageInfo, ct);
+    if (prepared.Success && prepared.FilePath is not null)
+    {
+        var install = await bootstrap.LaunchInstallerAsync(packageInfo, prepared.FilePath, ct);
+        // Success means the system installer was launched, not that installation completed.
+    }
+}
+```
+
+The GET endpoint returns a JSON `UpdatePackageInfo` (case-insensitive property names):
+
+```json
+{
+  "version": "2.3.0",
+  "downloadUrl": "https://example.com/app-release.apk",
+  "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "description": "Release notes",
+  "isForced": false
+}
+```
+
+Replace `sha256` with the actual APK's SHA-256, never an MD5 digest. Optional `fileSize` is in bytes; zero means unknown.
+HTTP 204 or JSON `null` returns `null`. HTTP failures, malformed JSON, invalid metadata and cancellation propagate as exceptions
+for the host to handle, not as "no update". Fetching does not change bootstrap state or raise update events.
+Use trusted endpoints and HTTPS in production. The caller owns and may reuse the `HttpClient`, configuring timeouts, TLS and proxy settings.
+
+### GeneralSpacestation / GeneralUpdate reference protocol
+
+For deployments implementing the [GeneralUpdate sample server](https://github.com/GeneralLibrary/GeneralUpdate-Samples/tree/main/src/Server)
+`POST /Upgrade/Verification` (or `/Update/Verification`) contract:
+
+```csharp
+var packageInfo = await packageClient.GetPackageInfoAsync(verificationUrl,
+    new UpdatePackageRequest
+    {
+        Version = currentVersion,
+        AppKey = appKey,
+        AppType = 1,
+        Platform = serverPlatformId,
+        ProductId = productId
+    }, ct);
+```
+
+The request uses `version/appKey/appType/platform/productId`. The response must be `{"code":200,"body":[...]}`.
+The client maps `version/url/hash/size/name/updateLog/releaseDate/isForcibly/authScheme/authToken` to package metadata and selects
+the newest non-frozen full APK. `packageType` must be 2, 0 or absent; `format` must be `apk`/`.apk`, or, if omitted, the URL path
+must end in `.apk`. ZIP, differential and driver packages are ignored. An empty eligible list returns `null`;
+an unsuccessful application code or missing/null `body` throws. Version ordering defaults to `System.Version`;
+pass an `IVersionComparer` to the client for other version schemes.
+
+The commercial GeneralSpacestation API is not publicly specified: **verify your deployment's route, schema and Android platform identifier**.
+Do not assume a fixed Android platform number. For other protocols, expose the standard JSON endpoint shown above.
+Pass an existing `IHttpAuthProvider` to the client constructor for metadata authentication (Bearer, API key, Basic or HMAC).
+`AppKey` is only a request field; it does not automatically enable HMAC. `HttpDownloadOptions` does not configure this separate metadata client.
+
 ## API
 
 ### Static Factory
