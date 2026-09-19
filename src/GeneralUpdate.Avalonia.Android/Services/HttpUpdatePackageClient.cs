@@ -12,7 +12,7 @@ namespace GeneralUpdate.Avalonia.Android.Services;
 /// Retrieves package metadata without validating the installed version or starting a download.
 /// The caller owns the supplied HttpClient, including its timeout and transport configuration.
 /// </summary>
-public sealed class HttpUpdatePackageClient
+internal sealed class HttpUpdatePackageClient : IDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -22,15 +22,42 @@ public sealed class HttpUpdatePackageClient
     private readonly HttpClient _httpClient;
     private readonly IHttpAuthProvider? _authProvider;
     private readonly IVersionComparer _versionComparer;
+    private readonly bool _ownsClient;
+
+    internal static HttpUpdatePackageClient Create(
+        HttpClient? httpClient, HttpDownloadOptions? httpOptions, IVersionComparer versionComparer)
+    {
+        if (httpOptions is not null)
+        {
+            var client = new HttpClient(httpOptions.BuildHandler())
+            {
+                Timeout = httpOptions.RequestTimeout
+            };
+            return new HttpUpdatePackageClient(client, httpOptions.AuthProvider, versionComparer, ownsClient: true);
+        }
+
+        return new HttpUpdatePackageClient(httpClient ?? new HttpClient(),
+            versionComparer: versionComparer, ownsClient: httpClient is null);
+    }
 
     public HttpUpdatePackageClient(
         HttpClient httpClient,
         IHttpAuthProvider? authProvider = null,
-        IVersionComparer? versionComparer = null)
+        IVersionComparer? versionComparer = null,
+        bool ownsClient = false)
     {
         _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
         _authProvider = authProvider;
         _versionComparer = versionComparer ?? new SystemVersionComparer();
+        _ownsClient = ownsClient;
+    }
+
+    public void Dispose()
+    {
+        if (_ownsClient)
+        {
+            _httpClient.Dispose();
+        }
     }
 
     /// <summary>

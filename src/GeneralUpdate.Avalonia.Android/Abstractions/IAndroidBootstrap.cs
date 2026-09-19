@@ -32,6 +32,15 @@ public interface IAndroidBootstrap : IDisposable
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="func"/> is null.</exception>
     IAndroidBootstrap AddListenerUpdatePrecheck(Func<UpdateInfoEventArgs, bool> func);
 
+    /// <summary>
+    /// Queries the configured update server, compares versions and invokes the pre-check callback.
+    /// Returning true from pre-check skips the update; false continues. Forced updates bypass pre-check.
+    /// The returned PackageInfo can be passed to download and installation.
+    /// </summary>
+    Task<UpdateCheckResult> ValidateAsync(
+        string currentVersion,
+        CancellationToken cancellationToken = default);
+
     Task<UpdateCheckResult> ValidateAsync(
         UpdatePackageInfo packageInfo,
         string currentVersion,

@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -21,6 +22,263 @@ public sealed class HttpUpdatePackageClientTests
         Platform = 42,
         ProductId = "test-product"
     };
+
+    [Theory]
+    [InlineData(true, false, false)]
+    [InlineData(false, false, true)]
+    [InlineData(true, true, true)]
+    public async Task ValidateAsync_QueriesInternallyThenAppliesPrecheck(bool skip, bool forced, bool expectedUpdate)
+    {
+        var order = new List<string>();
+        using var http = new HttpClient(new TestHandler(async (request, ct) =>
+        {
+            order.Add("request");
+            using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct));
+            Assert.Equal("1.0.0", body.RootElement.GetProperty("version").GetString());
+            Assert.Equal(VerificationRequest.Platform, body.RootElement.GetProperty("platform").GetInt32());
+            return JsonResponse($$"""
+                {"code":200,"body":[
+                  {"version":"2.0.0","url":"https://example.com/app.apk","hash":"{{Hash}}",
+                   "updateLog":"Latest release","isForcibly":{{forced.ToString().ToLowerInvariant()}}}
+                ]}
+                """);
+        }));
+        using var bootstrap = CreateBootstrap(http);
+        bootstrap.AddListenerUpdatePrecheck(args =>
+        {
+            order.Add("precheck");
+            Assert.Equal("2.0.0", args.PackageInfo.Version);
+            Assert.Equal("Latest release", args.PackageInfo.Description);
+            Assert.Equal("1.0.0", args.CurrentVersion);
+            Assert.True(args.Result.UpdateFound);
+            return skip;
+        });
+        bootstrap.AddListenerValidate += (_, _) => order.Add("validate");
+
+        var result = await bootstrap.ValidateAsync("1.0.0");
+
+        Assert.True(result.Success);
+        Assert.Equal(expectedUpdate, result.UpdateFound);
+        Assert.Equal(expectedUpdate ? UpdateState.UpdateAvailable : UpdateState.Completed, result.State);
+        Assert.Equal(result.State, bootstrap.GetSnapshot().State);
+        Assert.NotNull(result.PackageInfo);
+        Assert.Equal(forced ? new[] { "request", "validate" }
+            : skip ? new[] { "request", "precheck" }
+            : new[] { "request", "precheck", "validate" }, order);
+    }
+
+    [Theory]
+    [InlineData("{\"code\":200,\"body\":[]}", HttpStatusCode.OK, UpdateFailureReason.None)]
+    [InlineData("{\"code\":500,\"body\":[]}", HttpStatusCode.OK, UpdateFailureReason.InvalidMetadata)]
+    [InlineData("{", HttpStatusCode.OK, UpdateFailureReason.InvalidMetadata)]
+    [InlineData("{}", HttpStatusCode.Unauthorized, UpdateFailureReason.NetworkError)]
+    public async Task ValidateAsync_QueryResults_UpdateStateWithoutInvokingPrecheck(
+        string json, HttpStatusCode status, UpdateFailureReason failureReason)
+    {
+        using var http = CreateHttp(json, status);
+        using var bootstrap = CreateBootstrap(http);
+        var failed = 0;
+        bootstrap.AddListenerUpdatePrecheck(_ => throw new InvalidOperationException("Unexpected precheck."));
+        bootstrap.AddListenerValidate += (_, _) => throw new InvalidOperationException("Unexpected validation event.");
+        bootstrap.AddListenerUpdateFailed += (_, _) => failed++;
+
+        var result = await bootstrap.ValidateAsync("1.0.0");
+
+        Assert.Equal(failureReason == UpdateFailureReason.None, result.Success);
+        Assert.False(result.UpdateFound);
+        Assert.Equal(failureReason, result.FailureReason);
+        Assert.Equal(result.State, bootstrap.GetSnapshot().State);
+        Assert.Equal(result.Success ? 0 : 1, failed);
+    }
+
+    [Fact]
+    public async Task ValidateAsync_CurrentPackage_DoesNotInvokePrecheck()
+    {
+        using var http = CreateHttp($$"""
+            {"code":200,"body":[{"version":"1.0.0","url":"https://example.com/app.apk","hash":"{{Hash}}"}]}
+            """);
+        using var bootstrap = CreateBootstrap(http);
+        bootstrap.AddListenerUpdatePrecheck(_ => throw new InvalidOperationException("Unexpected precheck."));
+
+        var result = await bootstrap.ValidateAsync("1.0.0");
+
+        Assert.True(result.Success);
+        Assert.False(result.UpdateFound);
+        Assert.Equal(UpdateState.Completed, result.State);
+    }
+
+    [Fact]
+    public async Task ValidateAsync_CanceledRequest_ReportsCancellationAndReleasesGate()
+    {
+        using var cts = new CancellationTokenSource();
+        using var http = new HttpClient(new TestHandler(async (_, ct) =>
+        {
+            cts.Cancel();
+            await Task.Delay(Timeout.Infinite, ct);
+            return JsonResponse("null");
+        }));
+        using var bootstrap = CreateBootstrap(http);
+        var failed = 0;
+        bootstrap.AddListenerUpdateFailed += (_, _) => failed++;
+
+        var result = await bootstrap.ValidateAsync("1.0.0", cts.Token);
+
+        Assert.Equal(UpdateState.Canceled, result.State);
+        Assert.Equal(UpdateFailureReason.Canceled, result.FailureReason);
+        Assert.Equal(1, failed);
+        var manual = await bootstrap.ValidateAsync(new UpdatePackageInfo
+        {
+            Version = "1.0.0", DownloadUrl = "https://example.com/app.apk", Sha256 = Hash
+        }, "1.0.0").WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.True(manual.Success);
+    }
+
+    [Fact]
+    public async Task ValidateAsync_MissingServer_ReportsConfigurationFailure()
+    {
+        using var bootstrap = new AndroidBootstrap(new SystemVersionComparer(), new UnexpectedDownloader(),
+            new Sha256HashValidator(), new RecordingInstaller(), new PhysicalFileStorage());
+
+        var result = await bootstrap.ValidateAsync("1.0.0");
+
+        Assert.False(result.Success);
+        Assert.Equal(UpdateFailureReason.InvalidMetadata, result.FailureReason);
+        Assert.Equal(UpdateState.Failed, bootstrap.GetSnapshot().State);
+    }
+
+    [Fact]
+    public async Task ValidateAsync_ConcurrentChecks_AreSerializedIncludingRequests()
+    {
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var finish = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+        using var http = new HttpClient(new TestHandler(async (_, ct) =>
+        {
+            Interlocked.Increment(ref calls);
+            started.TrySetResult();
+            await finish.Task.WaitAsync(ct);
+            return JsonResponse("{\"code\":200,\"body\":[]}");
+        }));
+        using var bootstrap = CreateBootstrap(http);
+        var first = bootstrap.ValidateAsync("1.0.0");
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        var second = bootstrap.ValidateAsync("1.0.0");
+        Assert.False(second.IsCompleted);
+        Assert.Equal(1, calls);
+        finish.SetResult();
+        await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.Equal(2, calls);
+    }
+
+    [Fact]
+    public async Task Dispose_DoesNotDisposeInjectedHttpClient()
+    {
+        using var http = CreateHttp("{\"code\":200,\"body\":[]}");
+        var bootstrap = CreateBootstrap(http);
+        bootstrap.Dispose();
+
+        using var response = await http.GetAsync(Endpoint);
+        Assert.True(response.IsSuccessStatusCode);
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => bootstrap.ValidateAsync("1.0.0"));
+    }
+
+    [Fact]
+    public async Task ValidateAsync_HttpOptions_AuthenticatesInternalRequestToServer()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var address = (IPEndPoint)listener.LocalEndpoint;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var token = Guid.NewGuid().ToString("N");
+        using var bootstrap = new AndroidBootstrap(new SystemVersionComparer(), new UnexpectedDownloader(),
+            new Sha256HashValidator(), new RecordingInstaller(), new PhysicalFileStorage(),
+            updateServer: new UpdateServerOptions
+            {
+                RequestUrl = $"http://127.0.0.1:{address.Port}/Upgrade/Verification",
+                Platform = 42
+            },
+            httpOptions: new HttpDownloadOptions
+            {
+                AuthProvider = new BearerTokenAuthProvider(token),
+                RequestTimeout = TimeSpan.FromSeconds(5)
+            });
+
+        var checkTask = bootstrap.ValidateAsync("1.2.3", timeout.Token);
+        using var connection = await listener.AcceptTcpClientAsync(timeout.Token);
+        await using var stream = connection.GetStream();
+        using var reader = new StreamReader(stream, Encoding.UTF8, leaveOpen: true);
+        Assert.Equal("POST /Upgrade/Verification HTTP/1.1", await reader.ReadLineAsync(timeout.Token));
+        var headers = new List<string>();
+        while (await reader.ReadLineAsync(timeout.Token) is { Length: > 0 } header)
+        {
+            headers.Add(header);
+        }
+        var authorization = System.Net.Http.Headers.AuthenticationHeaderValue.Parse(
+            headers.Single(h => h.StartsWith("Authorization:", StringComparison.OrdinalIgnoreCase))
+                .Split(':', 2)[1].Trim());
+        Assert.Equal("Bearer", authorization.Scheme);
+        Assert.Equal(token, authorization.Parameter);
+        Assert.Contains("Transfer-Encoding: chunked", headers);
+        var requestBody = new StringBuilder();
+        while (true)
+        {
+            var chunkLength = Convert.ToInt32(await reader.ReadLineAsync(timeout.Token), 16);
+            if (chunkLength == 0)
+            {
+                break;
+            }
+            var chunk = new char[chunkLength];
+            Assert.Equal(chunkLength, await reader.ReadBlockAsync(chunk, timeout.Token));
+            requestBody.Append(chunk);
+            Assert.Equal(string.Empty, await reader.ReadLineAsync(timeout.Token));
+        }
+        using var json = JsonDocument.Parse(requestBody.ToString());
+        Assert.Equal("1.2.3", json.RootElement.GetProperty("version").GetString());
+        Assert.Equal(42, json.RootElement.GetProperty("platform").GetInt32());
+
+        const string body = "{\"code\":200,\"body\":[]}";
+        var response = Encoding.ASCII.GetBytes(
+            $"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {body.Length}\r\nConnection: close\r\n\r\n{body}");
+        await stream.WriteAsync(response, timeout.Token);
+        await stream.FlushAsync(timeout.Token);
+
+        var result = await checkTask;
+        Assert.True(result.Success);
+        Assert.False(result.UpdateFound);
+    }
+
+    [Fact]
+    public async Task ValidateAsync_RequestTimeout_IsNetworkFailureNotUserCancellation()
+    {
+        using var http = new HttpClient(new TestHandler((_, _) =>
+            throw new TaskCanceledException("Simulated request timeout.")));
+        using var bootstrap = CreateBootstrap(http);
+
+        var result = await bootstrap.ValidateAsync("1.0.0");
+
+        Assert.False(result.Success);
+        Assert.Equal(UpdateState.Failed, result.State);
+        Assert.Equal(UpdateFailureReason.NetworkError, result.FailureReason);
+    }
+
+    private static AndroidBootstrap CreateBootstrap(HttpClient http) =>
+        new(new SystemVersionComparer(), new UnexpectedDownloader(), new Sha256HashValidator(),
+            new RecordingInstaller(), new PhysicalFileStorage(),
+            updateServer: new UpdateServerOptions
+            {
+                RequestUrl = Endpoint,
+                AppKey = VerificationRequest.AppKey,
+                AppType = VerificationRequest.AppType,
+                Platform = VerificationRequest.Platform,
+                ProductId = VerificationRequest.ProductId
+            }, httpClient: http);
+
+    private sealed class UnexpectedDownloader : IUpdateDownloader
+    {
+        public Task<DownloadResult> DownloadAsync(UpdatePackageInfo packageInfo,
+            Action<DownloadProgressInfo>? progressCallback, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("Validation must not download a package.");
+    }
 
     [Fact]
     public async Task GetPackageInfoAsync_Get_MapsMetadataAndAppliesAuthentication()
@@ -212,18 +470,29 @@ public sealed class HttpUpdatePackageClientTests
             using var downloader = new HttpResumableApkDownloader(http, storage,
                 new AndroidUpdateOptions { DownloadDirectoryPath = directory });
             using var bootstrap = new AndroidBootstrap(new SystemVersionComparer(), downloader,
-                new Sha256HashValidator(), installer, storage);
+                new Sha256HashValidator(), installer, storage,
+                updateServer: new UpdateServerOptions
+                {
+                    RequestUrl = "https://example.com/metadata",
+                    UseJsonEndpoint = true
+                }, httpClient: http);
             var validationRaised = false;
             bootstrap.AddListenerValidate += (_, _) => validationRaised = true;
-
-            var package = await new HttpUpdatePackageClient(http).GetPackageInfoAsync("https://example.com/metadata");
-            Assert.NotNull(package);
-            Assert.False(validationRaised);
+            UpdatePackageInfo? precheckPackage = null;
+            bootstrap.AddListenerUpdatePrecheck(args =>
+            {
+                Assert.False(validationRaised);
+                precheckPackage = args.PackageInfo;
+                return false;
+            });
             Assert.Equal(UpdateState.None, bootstrap.GetSnapshot().State);
 
-            var check = await bootstrap.ValidateAsync(package, "1.0.0");
+            var check = await bootstrap.ValidateAsync("1.0.0");
             Assert.True(check.UpdateFound);
             Assert.True(validationRaised);
+            var package = check.PackageInfo;
+            Assert.NotNull(package);
+            Assert.Same(package, precheckPackage);
             var prepared = await bootstrap.DownloadAndVerifyAsync(package);
             Assert.True(prepared.Success, prepared.Message);
             Assert.Equal(UpdateState.ReadyToInstall, prepared.State);

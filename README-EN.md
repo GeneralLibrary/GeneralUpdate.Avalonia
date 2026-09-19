@@ -88,12 +88,12 @@ if (check.UpdateFound)
 }
 ```
 
-### Fetch server metadata before ValidateAsync
+### Automatic server verification
 
-Use `HttpUpdatePackageClient.GetPackageInfoAsync` to retrieve `UpdatePackageInfo` before calling `ValidateAsync`.
-It supports a GET JSON metadata endpoint and a POST overload for the GeneralUpdate reference verification protocol,
-with cancellation and existing authentication providers. Manual metadata construction remains supported.
-See [metadata retrieval and GeneralSpacestation compatibility](src/GeneralUpdate.Avalonia.Android/README.md#fetch-metadata-before-validation)
+Configure `AndroidUpdateOptions.UpdateServer` and call `ValidateAsync(currentVersion)`.
+Server requests happen internally; `AddListenerUpdatePrecheck` receives the latest package and returns `true` to skip
+or `false` to continue, matching GeneralUpdate. Forced updates bypass pre-check. Manual metadata remains supported.
+See [automatic verification and GeneralSpacestation compatibility](src/GeneralUpdate.Avalonia.Android/README.md#automatic-server-verification-and-pre-check)
 for examples, response formats and deployment requirements.
 
 ## Directory Structure

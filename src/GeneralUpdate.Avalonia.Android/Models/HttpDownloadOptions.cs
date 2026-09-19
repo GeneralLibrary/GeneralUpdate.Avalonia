@@ -4,7 +4,7 @@ using GeneralUpdate.Avalonia.Android.Abstractions;
 namespace GeneralUpdate.Avalonia.Android.Models;
 
 /// <summary>
-/// Configures HTTP transport behavior for update downloads:
+/// Configures HTTP transport behavior for update verification and downloads:
 /// SSL/TLS certificate validation, timeouts, proxy, retry, and authentication.
 /// <para>
 /// When provided to <see cref="GeneralUpdateBootstrap.CreateDefault"/>,
@@ -23,7 +23,7 @@ public sealed record HttpDownloadOptions
     public ISslValidationPolicy? SslValidationPolicy { get; init; }
 
     /// <summary>
-    /// Timeout for individual HTTP requests (HEAD probes, etc.).
+    /// Timeout for server verification requests and download HEAD probes.
     /// Default is 30 seconds.
     /// </summary>
     public TimeSpan RequestTimeout { get; init; } = TimeSpan.FromSeconds(30);
@@ -61,8 +61,8 @@ public sealed record HttpDownloadOptions
     public TimeSpan RetryBaseDelay { get; init; } = TimeSpan.FromSeconds(1);
 
     /// <summary>
-    /// Global authentication provider applied to all download requests.
-    /// Per-package authentication on <see cref="UpdatePackageInfo"/> takes precedence.
+    /// Global authentication provider applied to verification and download requests.
+    /// Per-package authentication on <see cref="UpdatePackageInfo"/> takes precedence for downloads.
     /// </summary>
     public IHttpAuthProvider? AuthProvider { get; init; }
 

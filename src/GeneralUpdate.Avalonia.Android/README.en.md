@@ -72,16 +72,17 @@ Default wiring:
 | `IApkInstaller` | `AndroidApkInstaller` |
 | `IVersionComparer` | `SystemVersionComparer` |
 
-### Query metadata before ValidateAsync
+### Automatic server verification
 
-`HttpUpdatePackageClient.GetPackageInfoAsync` supports GET JSON metadata and the POST GeneralUpdate verification reference protocol,
-independently of version comparison, with cancellation and existing authentication providers.
-See [examples and GeneralSpacestation compatibility](README.md#fetch-metadata-before-validation).
+Configure `AndroidUpdateOptions.UpdateServer` and call `ValidateAsync(currentVersion)` to query the server internally.
+`AddListenerUpdatePrecheck` receives the latest package; return `true` to skip or `false` to continue (forced updates bypass it).
+See [examples and GeneralSpacestation compatibility](README.md#automatic-server-verification-and-pre-check).
 
 ### IAndroidBootstrap Methods
 
 | Method | Returns |
 |---|---|
+| `ValidateAsync(currentVersion, ct)` | `UpdateCheckResult`, including the discovered `PackageInfo` |
 | `ValidateAsync(packageInfo, currentVersion, ct)` | `UpdateCheckResult` |
 | `DownloadAndVerifyAsync(packageInfo, ct)` | `UpdateOperationResult` |
 | `LaunchInstallerAsync(packageInfo, apkFilePath, ct)` | `InstallResult` |

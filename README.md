@@ -88,24 +88,35 @@ if (check.UpdateFound)
 }
 ```
 
-### 在 ValidateAsync 前获取服务器包信息
+### 自动查询服务器并通过 precheck 决定是否更新
 
-`ValidateAsync` 只比较传入的版本，`AddListenerUpdatePrecheck` 也不会查询服务器。
-使用独立的 `HttpUpdatePackageClient` 即可先获取、查看 `UpdatePackageInfo`，无需手动填写每次发布的包信息：
+配置 `AndroidUpdateOptions.UpdateServer` 后，`ValidateAsync(currentVersion)` 会在组件内部请求服务器、
+选择最新完整 APK 并比较版本。有更新时，通过 `AddListenerUpdatePrecheck` 提供最新包信息，由回调决定是否继续。
+不需要创建或显式调用 HTTP 查询组件。
 
 ```csharp
-using GeneralUpdate.Avalonia.Android.Services;
+var options = new AndroidUpdateOptions
+{
+    FileProviderAuthority = "com.example.app.generalupdate.fileprovider",
+    UpdateServer = new UpdateServerOptions
+    {
+        RequestUrl = verificationUrl,
+        AppKey = appKey,
+        AppType = 1,
+        Platform = serverPlatformId,
+        ProductId = productId
+    }
+};
+using var bootstrap = GeneralUpdateBootstrap.CreateDefault(options);
+bootstrap.AddListenerUpdatePrecheck(args =>
+{
+    // args.PackageInfo：最新版本、下载地址、SHA256、Description 更新说明等。
+    // 与 GeneralUpdate 一致：true 跳过，false 继续；强制更新不调用此回调。
+    return false;
+});
 
-// HttpClient 由宿主管理，可复用并配置超时、代理和 TLS。
-using var httpClient = new HttpClient();
-var packageClient = new HttpUpdatePackageClient(httpClient);
-var packageInfo = await packageClient.GetPackageInfoAsync(
-    "https://example.com/android/latest.json", CancellationToken.None);
-if (packageInfo is null) return; // 没有可用包，不要传 null 给 ValidateAsync
-
-// 此处可读取版本说明等信息，尚未比较版本或触发更新事件。
-var check = await bootstrap.ValidateAsync(packageInfo, "2.2.1", CancellationToken.None);
-if (check.Success && check.UpdateFound)
+var check = await bootstrap.ValidateAsync("2.2.1", CancellationToken.None);
+if (check.Success && check.UpdateFound && check.PackageInfo is { } packageInfo)
 {
     var prepared = await bootstrap.DownloadAndVerifyAsync(packageInfo, CancellationToken.None);
     if (prepared.Success && prepared.FilePath is not null)
@@ -116,7 +127,12 @@ if (check.Success && check.UpdateFound)
 }
 ```
 
-GET 地址返回 `UpdatePackageInfo` JSON（字段名不区分大小写），例如：
+回调返回 `true` 时，结果的 `UpdateFound` 为 `false`，不会触发 `AddListenerValidate`。
+没有更新时也不调用 precheck。回调同步执行，不会自动切换到 UI 线程。
+旧的 `ValidateAsync(packageInfo, currentVersion)` 重载保留，不请求服务器。
+
+如果服务器提供静态 JSON，设置 `UpdateServer.UseJsonEndpoint = true` 并将 `RequestUrl` 指向 JSON 地址。
+组件自动 GET `UpdatePackageInfo` JSON（字段名不区分大小写），例如：
 
 ```json
 {
@@ -129,36 +145,29 @@ GET 地址返回 `UpdatePackageInfo` JSON（字段名不区分大小写），例
 ```
 
 `sha256` 必须替换为实际 APK 的 SHA-256，不能使用 MD5。`fileSize` 可省略或为 0（未知），已知时单位为字节。
-HTTP 204 或 JSON `null` 表示无包；HTTP 错误、错误 JSON、缺失/无效元数据及取消操作会抛出异常，宿主应处理，不能视为“无更新”。
+HTTP 204 或 GET JSON `null` 表示无包；请求/协议错误通过 `UpdateCheckResult.Success = false`、
+`FailureReason` 和 `AddListenerUpdateFailed` 通知，不会触发 precheck。请求期间取消会返回 `Canceled`；
+等待操作锁时取消会抛出 `OperationCanceledException`，与已有重载一致。
 仅应查询可信服务器，生产环境使用 HTTPS。
 
 #### GeneralSpacestation / GeneralUpdate 验证协议
 
 对于采用 [GeneralUpdate 示例服务器](https://github.com/GeneralLibrary/GeneralUpdate-Samples/tree/main/src/Server)
-`POST /Upgrade/Verification`（或 `/Update/Verification`）协议的部署，使用另一重载：
-
-```csharp
-var request = new UpdatePackageRequest
-{
-    Version = currentVersion,
-    AppKey = appKey,
-    AppType = 1,
-    Platform = serverPlatformId,
-    ProductId = productId
-};
-var packageInfo = await packageClient.GetPackageInfoAsync(verificationUrl, request, cancellationToken);
-```
+`POST /Upgrade/Verification`（或 `/Update/Verification`）协议的部署，使用上述默认配置即可。
 
 请求发送 `version/appKey/appType/platform/productId`，响应为 `{"code":200,"body":[...]}`。
 客户端映射 `version/url/hash/size/name/updateLog/releaseDate/isForcibly/authScheme/authToken`，
 按版本选取最新的非冻结完整 APK（`packageType` 为 2、0 或省略；`format` 为 `apk`/`.apk`，省略时 URL 路径须以 `.apk` 结尾）。
 ZIP、差分包、驱动包不会交给 Android 安装器。`body: []` 或没有符合条件的包返回 `null`；
-非 200 业务码、缺失或 `null` 的 `body` 会报错。默认使用 `System.Version` 比较版本，也可在构造客户端时传入 `IVersionComparer`。
+非 200 业务码、缺失或 `null` 的 `body` 会报告失败。默认使用 `System.Version` 比较版本，
+也可通过 `CreateDefault` 的 `versionComparer` 同时替换包选择和本地版本比较逻辑。
 
 GeneralSpacestation 商业服务的接口并未公开，**请核对实际部署的地址、响应格式和 Android 平台编号，不要假定固定编号**；
-协议不同时可由服务器提供上面的标准 JSON 端点。查询认证通过构造参数 `authProvider` 配置，可复用现有
+协议不同时可由服务器提供上面的标准 JSON 端点。查询与下载均使用 `CreateDefault` 的 `httpOptions`，
+其中 `AuthProvider` 可使用现有
 `BearerTokenAuthProvider`、`ApiKeyAuthProvider`、`BasicAuthProvider` 或 `HmacAuthProvider`。
-`AppKey` 仅是请求字段，不会自动启用 HMAC；`HttpDownloadOptions` 不会自动作用于独立查询客户端。
+`AppKey` 仅是请求字段，不会自动启用 HMAC。查询使用 `RequestTimeout`、代理和 TLS 配置；
+不提供 `httpOptions` 时可复用传入的 `httpClient`，其生命周期仍由宿主管理。
 
 ## 目录结构
 

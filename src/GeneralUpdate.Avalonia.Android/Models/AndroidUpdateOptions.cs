@@ -2,6 +2,7 @@ namespace GeneralUpdate.Avalonia.Android.Models;
 
 public sealed record AndroidUpdateOptions
 {
+    public UpdateServerOptions? UpdateServer { get; init; }
     public string DownloadDirectoryPath { get; init; } = string.Empty;
     public string TemporaryFileExtension { get; init; } = ".part";
     public string SidecarExtension { get; init; } = ".json";

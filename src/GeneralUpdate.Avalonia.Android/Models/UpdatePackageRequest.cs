@@ -4,7 +4,7 @@ namespace GeneralUpdate.Avalonia.Android.Models;
 /// Request body for the GeneralUpdate /Upgrade/Verification reference protocol.
 /// Platform must match the identifier configured by the server.
 /// </summary>
-public sealed record UpdatePackageRequest
+internal sealed record UpdatePackageRequest
 {
     public required string Version { get; init; }
     public required string AppKey { get; init; }

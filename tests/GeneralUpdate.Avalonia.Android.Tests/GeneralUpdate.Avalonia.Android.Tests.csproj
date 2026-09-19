@@ -20,6 +20,7 @@
     <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Models/HttpDownloadOptions.cs" Link="Source/Models/HttpDownloadOptions.cs" />
     <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Models/DownloadResumeMetadata.cs" Link="Source/Models/DownloadResumeMetadata.cs" />
     <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Models/UpdatePackageRequest.cs" Link="Source/Models/UpdatePackageRequest.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Models/UpdateServerOptions.cs" Link="Source/Models/UpdateServerOptions.cs" />
     <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Services/HttpUpdatePackageClient.cs" Link="Source/Services/HttpUpdatePackageClient.cs" />
     <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Services/HttpResumableApkDownloader.cs" Link="Source/Services/HttpResumableApkDownloader.cs" />
     <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Services/AuthProviders.cs" Link="Source/Services/AuthProviders.cs" />

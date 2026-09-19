@@ -63,6 +63,9 @@ public static class GeneralUpdateBootstrap
             installer,
             usedStorage,
             eventDispatcher,
-            usedLogger);
+            usedLogger,
+            options.UpdateServer,
+            httpClient,
+            httpOptions);
     }
 }
