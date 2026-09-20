@@ -22,6 +22,7 @@ The project uses composable abstractions so you can replace version comparison, 
 - **Extensible architecture**: `IVersionComparer`, `IUpdateDownloader`, `IHashValidator`, `IApkInstaller`, and more are replaceable.  
 - **Resumable downloading**: sidecar metadata + streaming writes for better reliability on unstable networks.  
 - **Unified event model**: built-in validation, progress, completion, and failure events for UI/log integration.  
+- **Durable coordinator**: complete-attempt serialization, pending-install tracking, next-launch version confirmation and explicit recovery.
 
 ## Quick Start
 
@@ -53,7 +54,7 @@ dotnet add package GeneralUpdate.Avalonia.Android
 dotnet test tests/GeneralUpdate.Avalonia.Android.Tests/GeneralUpdate.Avalonia.Android.Tests.csproj
 ```
 
-### Basic Usage
+### Low-level Usage
 
 ```csharp
 using GeneralUpdate.Avalonia.Android;
@@ -90,6 +91,63 @@ if (check.Success && check.UpdateFound && check.PackageInfo is { } packageInfo)
     }
 }
 ```
+
+### Coordinated Updates and Next-launch Confirmation
+
+For new integrations, use `GeneralUpdateBootstrap.CreateCoordinator(options)` instead of manually chaining the three
+low-level operations. It owns the bootstrap it creates, serializes the complete workflow, and records a durable intent
+**before** launching Android's installer. Keep the coordinator for the host's update-service lifetime.
+
+```csharp
+using GeneralUpdate.Avalonia.Android.Enums;
+
+await using var coordinator = GeneralUpdateBootstrap.CreateCoordinator(options);
+coordinator.StateChanged += (_, args) =>
+    Console.WriteLine($"{args.Result.Stage}: {args.Result.Outcome}");
+
+// Read the actual installed app version from the host, not the server's target version.
+var startup = await coordinator.ReconcileAsync(installedVersion, cancellationToken);
+if (startup.Outcome == UpdateCoordinatorOutcome.NoPendingUpdate)
+{
+    // Invoke from the host's update command/policy, not from a notification callback.
+    var result = await coordinator.RunAsync(installedVersion, cancellationToken);
+    // InstallerLaunched is a handoff; Updated is reported only by reconciliation.
+}
+```
+
+| Operation | Contract |
+|---|---|
+| `RunAsync(currentVersion, ct)` | Check → download/verify → persist intent → launch installer. Existing pending state returns `PendingUpdateExists` without another install. |
+| `ReconcileAsync(currentVersion, ct)` | Offline startup check. Installed version equal to or newer than the pending target returns `Updated`; the old version remains `AwaitingInstallation` or `RecoveryRequired`. No intent returns `NoPendingUpdate`. |
+| `RetryAsync(currentVersion, ct)` | Explicit recovery of a pending attempt: reconcile first, then rediscover and verify the same target. A changed server target returns `RecoveryRequired` without overwriting the earlier handoff. Never installs a persisted path or reuses stored credentials. Use `RunAsync` again after failures that left no pending intent. |
+| `AbandonAsync(ct)` | Explicitly forget pending tracking, including corrupt state. Does **not** cancel Android installation, delete APKs, or roll back the app/data. |
+
+`StateChanged` reports named stages and a terminal outcome, rather than treating a generic “completed” notification as
+installation success. Pass an `IUpdateEventDispatcher` to `CreateCoordinator` for Avalonia UI dispatch, as shown below.
+Check `Outcome` and `FailureReason`: `InstallerLaunched`, `NoUpdate` and `Updated` have different meanings.
+Subscribe to `AddListenerDownloadProgressChanged` for byte/speed progress and register `AddListenerUpdatePrecheck` before
+starting operations for optional-update policy (`true` still means skip; forced updates bypass it). These are forwarded
+through the coordinator, so factory users do not need access to its underlying bootstrap.
+The legacy `CreateDefault` / `IAndroidBootstrap` API remains available and unchanged.
+
+The factory stores only a versioned attempt ID, original/target versions, timestamp and handoff phase in
+`<NoBackupFilesDir>/generalupdate/pending-update.json`. No APK path, URL, package credentials or exception is serialized.
+The file is atomically replaced from a flushed temporary file in the same directory. Corrupt, oversized or unknown-schema state
+fails closed instead of silently starting another update. A write failure before handoff prevents installer launch; uncertainty
+after handoff remains pending for reconciliation. This protects process-restart recovery, not arbitrary storage hardware failure.
+For a custom location/store, pass `pendingStore: new JsonPendingUpdateStore(privatePersistentPath)` (services namespace);
+do not place the record in a cache, shared downloads folder or backup-restored location.
+The default JSON store holds an exclusive `.lock` file lease for the entire workflow, preventing cooperating coordinator
+instances/processes using the same state path from overwriting each other's intent. Do not delete that lock file while in use.
+Custom stores can implement `IPendingUpdateStoreLeaseProvider`; otherwise the host must enforce a single coordinator.
+Separate state paths do not protect a shared APK staging directory, so use one coordinator per staging directory.
+
+**Recovery policy:** reconcile on each app launch and when returning from the installer, using the actual installed version.
+An unchanged version is not proof the user rejected installation—it may still be in progress. Offer explicit retry or abandonment;
+do not automatically loop on either. If the server now offers a different target, reconcile the earlier handoff or explicitly abandon
+its tracking before starting a new attempt. A successful reconciliation confirms the observed version, not application health or successful
+data migration. Silent installation, automatic relaunch, OS downgrade/rollback, signed manifests and APK identity preflight are not
+provided. The host still supplies installation permissions/FileProvider configuration and must validate device behavior.
 
 ### Server-Driven Version Validation
 
@@ -234,12 +292,13 @@ Cancellation while waiting for the gate still throws `OperationCanceledException
 cancellation during verification returns a canceled result. Notification exceptions are logged and isolated, whereas a pre-check
 exception produces a failed validation result. Installed-version confirmation is still not part of disposal or a completed event.
 
-Use a single host coordinator and a private staging directory for the full check → download/verify → install sequence.
+Use a single coordinator and a private staging directory for the full check → download/verify → install sequence.
 Only hand the returned verified path to the installer; do not modify or remove the APK while installation may be reading it.
 The public installer method also supports independent calls, so it does not establish verification provenance for arbitrary paths.
-Persist the target version before handoff, reconcile the actual installed version on next launch, and clear obsolete staging files
-only when no update/installer is using them. Keep resumable partial files for a bounded retention period.
-Permission prompting, actual installation outcome, app relaunch and recovery from a bad release or data migration remain host/platform
+`CreateCoordinator` handles target-version persistence and next-launch reconciliation; call `ReconcileAsync` at startup with the
+actual installed version. With the low-level API, implement that tracking in the host. Clear obsolete staging files only when no
+update/installer is using them. Keep resumable partial files for a bounded retention period.
+Permission prompting, app relaunch and recovery from a bad release or data migration remain host/platform
 responsibilities; they are not made reliable merely by a successful installer intent.
 
 ## Source Review and Production Readiness
@@ -260,13 +319,20 @@ retained with revision-pinned evidence; **its defect descriptions refer to the p
 | Callback errors | Synchronous notification subscriber, dispatcher and logger exceptions cannot replace operation outcomes. A throwing pre-check fails validation instead of bypassing host policy. | `BootstrapLifecycleTests`: throwing subscribers/loggers/dispatchers and fail-closed pre-check. |
 | Package license | NuGet metadata now declares Apache-2.0, matching the existing LICENSE. | MSBuild property evaluation against LICENSE. |
 
-Validation after remediation: **160/160 core tests passed** (no failures or skips), including HEAD-rejection fallback and
+Validation of the earlier remediation: **160/160 core tests passed** (no failures or skips), including HEAD-rejection fallback and
 authentication-policy failures returning terminal validation results before provider/network invocation.
-The local Android build could not run because the `android` workload is missing (`NETSDK1147`); current PR CI requires approval.
+At that stage the local Android build was blocked by the missing `android` workload (`NETSDK1147`).
 Tests for these fixes use the existing .NET core test project; they are not Android device installation tests.
-The fixes do **not** add desktop support, installer completion callbacks, automatic restart/rollback, independent manifest signing,
-APK identity preflight, persisted workflow state, directory-wide coordination, or a runnable Avalonia sample.
-UI dispatch, verified-path handoff, cache retention and next-launch reconciliation remain explicit host responsibilities described above.
+The coordinator addition now provides persistent intent tracking, complete-attempt orchestration, offline installed-version
+reconciliation, explicit retry/abandon recovery and stage-specific outcomes (see the new integration section).
+Coordinator validation: **57 focused tests and all 217 core tests passed**. With the Android workload installed,
+the Android library **Release build succeeded**, including the default factory. Coverage includes real HTTP downloader/storage/hash
+integration with fake transport/installer, persistent state across recreated coordinators, uncertain handoff, concurrency and recovery.
+The build retains the existing dependency advisory noted below and three XML-documentation warnings. PR CI still requires approval;
+no device/emulator installation, restart or application-health validation was performed.
+The fixes do **not** add desktop support, native installer completion callbacks, automatic restart/rollback, independent manifest signing,
+APK identity preflight, or a runnable Avalonia sample.
+UI dispatch, providing the actual installed version, invoking reconciliation at startup and cache retention remain host responsibilities.
 Metadata-provider/storage extensibility and production dependency/device validation remain follow-up work, not silently resolved findings.
 
 ### Historical scope and evidence (before remediation)
@@ -373,7 +439,9 @@ Snapshots are in-memory and do not establish verified-package provenance or cras
 shutdown and post-install reconciliation. The default logger is no-op; production hosts need stage/failure telemetry without credentials.
 
 **Dependency risks:** [AndroidX Core is the runtime package dependency; SourceLink is private build tooling][review-project].
-No dependency advisory audit or transitive inventory was performed for this assessment, so version age alone is not a vulnerability finding.
+The original assessment did not include a dependency advisory audit or transitive inventory.
+The subsequent coordinator build reports a pre-existing `Microsoft.Build.Tasks.Git` 8.0.0 advisory
+([GHSA-23fw-v26w-5fgq](https://github.com/advisories/GHSA-23fw-v26w-5fgq)); this change does not update dependencies.
 Validate the resolved dependency graph, Android workload/toolchain compatibility and packaged artifact on supported devices before release.
 
 ### Original validation evidence and remaining production release gates

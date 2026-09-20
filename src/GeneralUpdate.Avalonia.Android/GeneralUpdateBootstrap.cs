@@ -7,6 +7,42 @@ namespace GeneralUpdate.Avalonia.Android;
 
 public static class GeneralUpdateBootstrap
 {
+    /// <summary>
+    /// Creates an owning coordinator for complete update attempts and next-launch reconciliation.
+    /// Pending state defaults to the app-private no-backup files directory, never the APK cache.
+    /// Supply a store explicitly when an Android context is unavailable.
+    /// </summary>
+    public static IAndroidUpdateCoordinator CreateCoordinator(
+        AndroidUpdateOptions options,
+        IPendingUpdateStore? pendingStore = null,
+        IAndroidContextProvider? contextProvider = null,
+        IAndroidActivityProvider? activityProvider = null,
+        HttpClient? httpClient = null,
+        IVersionComparer? versionComparer = null,
+        IUpdateEventDispatcher? eventDispatcher = null,
+        IUpdateLogger? logger = null,
+        HttpDownloadOptions? httpOptions = null)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        var usedContextProvider = contextProvider ?? new DefaultAndroidContextProvider();
+        if (pendingStore is null)
+        {
+            var filesDirectory = usedContextProvider.GetContext()?.NoBackupFilesDir?.AbsolutePath;
+            if (string.IsNullOrWhiteSpace(filesDirectory))
+            {
+                throw new InvalidOperationException(
+                    "A persistent app-private directory is unavailable. Supply an IPendingUpdateStore.");
+            }
+
+            pendingStore = new JsonPendingUpdateStore(Path.Combine(filesDirectory, "generalupdate", "pending-update.json"));
+        }
+
+        var usedVersionComparer = versionComparer ?? new SystemVersionComparer();
+        var bootstrap = CreateDefault(options, usedContextProvider, activityProvider, httpClient,
+            usedVersionComparer, eventDispatcher, logger, httpOptions);
+        return new AndroidUpdateCoordinator(bootstrap, pendingStore, usedVersionComparer, eventDispatcher, ownsBootstrap: true);
+    }
+
     public static IAndroidBootstrap CreateDefault(
         AndroidUpdateOptions options,
         IAndroidContextProvider? contextProvider = null,

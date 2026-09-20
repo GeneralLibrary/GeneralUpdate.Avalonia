@@ -18,6 +18,7 @@ UI-free Android auto-update core library for Avalonia 12+ apps (`net10.0-android
 - **Resumable HTTP download** with sidecar metadata and smoothed speed reporting.
 - **Replaceable abstractions** — every stage is an interface you can swap.
 - **Operation serialization** — concurrent calls are gated, safe to call from any thread.
+- **Durable coordination** — pending-install tracking, next-launch version reconciliation, and explicit retry/abandon.
 
 ## Quick Start
 
@@ -58,6 +59,52 @@ if (check.Success && check.UpdateFound && check.PackageInfo is { } packageInfo)
 }
 ```
 
+## Durable Coordinator (recommended)
+
+`GeneralUpdateBootstrap.CreateCoordinator(options)` provides a higher-level `IAndroidUpdateCoordinator` without
+changing `IAndroidBootstrap`. Use the same server, FileProvider and permission configuration shown above.
+
+```csharp
+using GeneralUpdate.Avalonia.Android.Enums;
+
+await using var coordinator = GeneralUpdateBootstrap.CreateCoordinator(options);
+coordinator.StateChanged += (_, e) => Console.WriteLine($"{e.Result.Stage}: {e.Result.Outcome}");
+var startup = await coordinator.ReconcileAsync(installedVersion, ct);
+if (startup.Outcome == UpdateCoordinatorOutcome.NoPendingUpdate)
+{
+    // On an explicit host update command:
+    var result = await coordinator.RunAsync(installedVersion, ct);
+}
+```
+
+Supply the actual installed version, not the server target. The coordinator serializes complete attempts and persists
+intent before installer launch in `<NoBackupFilesDir>/generalupdate/pending-update.json`. The versioned, atomically replaced
+record contains only attempt ID, original/target versions, timestamp and phase—never URLs, file paths or credentials.
+Pass `pendingStore` to inject an `IPendingUpdateStore`; custom storage must be private, persistent and not restored from backups.
+
+| Method | Outcome |
+|---|---|
+| `RunAsync` | Check → download/verify → persist → handoff. `InstallerLaunched` is **not** installed; existing intent returns `PendingUpdateExists`. |
+| `ReconcileAsync` | Offline next-launch confirmation: `Updated` only when the observed installed version meets/exceeds the target; otherwise `AwaitingInstallation`/`RecoveryRequired`. |
+| `RetryAsync` | Explicit recovery of a pending attempt; reconcile first, then rediscover/download/verify the same target. Changed targets return `RecoveryRequired` and preserve the old intent. No stored APK path is installed. Use `RunAsync` again if no intent was persisted. |
+| `AbandonAsync` | Forget tracking, including corrupt state; no APK deletion, OS cancellation or rollback. |
+
+Progress and pre-check remain available through `AddListenerDownloadProgressChanged` and `AddListenerUpdatePrecheck`.
+Register policy before operations; `true` means skip an optional update, and forced updates bypass the callback.
+The JSON store holds a workflow-wide exclusive `.lock` lease across cooperating instances/processes; do not remove it in use.
+Custom stores without `IPendingUpdateStoreLeaseProvider` require a singleton coordinator. Different state files do not
+protect the same staging directory.
+
+Corrupt/unknown-schema state fails closed. Write failures prevent launch; an uncertain handoff remains recoverable.
+Pass `eventDispatcher` for UI delivery of named stages and terminal outcomes. Cancellation returns `Canceled`, including
+while waiting for the coordinator gate. The factory coordinator owns its bootstrap; direct `new AndroidUpdateCoordinator(...)`
+leaves a supplied bootstrap host-owned unless `ownsBootstrap: true`. Dispose asynchronously outside callbacks to await shutdown.
+Do not mix direct bootstrap calls with coordinator operations.
+
+Call reconciliation at startup and after returning from the installer. An unchanged version may mean installation is still pending;
+retry/abandon must be explicit. This confirms installed-version convergence, not app health, data migration, silent installation,
+automatic relaunch or rollback. Those require host/platform policy and real-device validation.
+
 ## Host UI and Recovery
 
 Global download authentication is limited to the configured verification origin. Set
@@ -73,8 +120,9 @@ as `eventDispatcher` to `CreateDefault`. Pre-check is synchronous and is not dis
 not controls. Unsubscribe ViewModel event handlers when released, throttle progress rendering, and never synchronously
 wait for another update operation inside a callback. Catch exceptions inside `async void` handlers after awaits.
 
-Use one coordinator per private staging directory, preserve the verified file while the installer may still read it, and
-persist the intended version for reconciliation on next launch. Installer launch is not installation confirmation.
+Use one coordinator per private staging directory and preserve the verified file while the installer may still read it.
+The durable coordinator tracks the intended version; call its reconciliation method on next launch. With the low-level API,
+the host must provide that tracking. Installer launch is not installation confirmation.
 The host owns permission prompting, stale-cache retention, relaunch and failed-release/data-migration recovery.
 
 `Dispose()` cancels without blocking and defers resource release until operations and waiters drain. The concrete

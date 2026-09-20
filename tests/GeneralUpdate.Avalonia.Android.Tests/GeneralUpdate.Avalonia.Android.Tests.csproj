@@ -14,6 +14,17 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Abstractions/IAndroidUpdateCoordinator.cs" Link="Source/Abstractions/IAndroidUpdateCoordinator.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Abstractions/IPendingUpdateStore.cs" Link="Source/Abstractions/IPendingUpdateStore.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Abstractions/IPendingUpdateStoreLeaseProvider.cs" Link="Source/Abstractions/IPendingUpdateStoreLeaseProvider.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Enums/UpdateCoordinatorStage.cs" Link="Source/Enums/UpdateCoordinatorStage.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Enums/UpdateCoordinatorOutcome.cs" Link="Source/Enums/UpdateCoordinatorOutcome.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Enums/PendingUpdatePhase.cs" Link="Source/Enums/PendingUpdatePhase.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Models/PendingUpdateAttempt.cs" Link="Source/Models/PendingUpdateAttempt.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Models/UpdateCoordinatorResult.cs" Link="Source/Models/UpdateCoordinatorResult.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Events/UpdateCoordinatorEventArgs.cs" Link="Source/Events/UpdateCoordinatorEventArgs.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Services/AndroidUpdateCoordinator.cs" Link="Source/Services/AndroidUpdateCoordinator.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Services/JsonPendingUpdateStore.cs" Link="Source/Services/JsonPendingUpdateStore.cs" />
     <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Abstractions/IApkInstaller.cs" Link="Source/Abstractions/IApkInstaller.cs" />
     <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Abstractions/IAndroidBootstrap.cs" Link="Source/Abstractions/IAndroidBootstrap.cs" />
     <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Abstractions/IFileStorage.cs" Link="Source/Abstractions/IFileStorage.cs" />
