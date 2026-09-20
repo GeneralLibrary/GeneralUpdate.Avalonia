@@ -172,9 +172,104 @@ configures all four items below:
 finished installing. The process is killed on completion, so compare the installed version with the server again on the next
 launch to confirm the update actually took effect.
 
+## Host UI and Recovery Responsibilities
+
+### Authentication and transport migration
+
+`HttpDownloadOptions.AuthProvider` authenticates the configured verification endpoint. For downloads it is now applied
+only to that endpoint's origin (scheme, host and effective port) or an origin explicitly listed by the host in
+`AllowedDownloadAuthenticationOrigins`. Paths do not narrow that trust. `TrustedAuthenticationOrigin` overrides the default
+origin for both verification and downloads; without a valid trusted origin, downloads get no global credentials unless explicitly allowed.
+An unlisted CDN remains anonymous; valid per-package credentials still take precedence at the original package URL.
+
+```csharp
+var httpOptions = new HttpDownloadOptions
+{
+    AuthProvider = myAuthenticationProvider,
+    AllowedDownloadAuthenticationOrigins = new[] { new Uri("https://packages.example.com") },
+    MaxRetryAttempts = 3,
+    DownloadTimeout = TimeSpan.FromMinutes(10)
+};
+```
+
+Only opt in a CDN if it is trusted to receive those credentials. Library-applied authentication requires HTTPS by default;
+`AllowInsecureAuthentication = true` is an explicitly unsafe development-only escape hatch, not a production recommendation.
+It does not disable origin checks. Anonymous HTTP remains supported for compatibility; use trusted HTTPS metadata and APK endpoints
+in production, with system certificate validation (never `AllowAllSslValidationPolicy`).
+
+**Compatibility changes:** internally created clients no longer follow redirects, even within the same origin.
+Configure the final verification/APK URLs rather than relying on 3xx responses. If you inject an `HttpClient`, you own its
+handler/default headers: disable automatic redirects and avoid unrestricted credential headers yourself. The library cannot
+prevent an injected handler from following redirects or transmitting its own headers. When `httpOptions` is provided,
+the existing factory behavior still constructs internal clients instead of using the supplied client.
+Retry limits apply to the complete download attempt (HEAD + GET/body); they do not add retry to metadata discovery.
+With no `httpOptions`, downloads retain a single attempt.
+
+### UI and lifecycle
+
+Keep the core UI-free: implement this adapter in the **Avalonia host**, not in the Android library:
+
+```csharp
+using Avalonia.Threading;
+using GeneralUpdate.Avalonia.Android.Abstractions;
+
+public sealed class AvaloniaUpdateDispatcher : IUpdateEventDispatcher
+{
+    public void Dispatch(Action callback) => Dispatcher.UIThread.Post(callback);
+}
+```
+
+Pass `eventDispatcher: new AvaloniaUpdateDispatcher()` to `CreateDefault`. Bind progress/results to your ViewModel
+from the dispatched events, and retain the event delegates so the ViewModel can unsubscribe with `-=` when released.
+Coalesce frequent progress updates in the host rather than enqueueing expensive rendering for every buffer.
+Pre-check is synchronous and is **not** dispatched: read already-captured application policy, not controls, inside it.
+Never call `.Wait()`/`.Result` on another update operation or on asynchronous disposal from a callback.
+An `async void` event handler must catch its own exceptions after an `await`; synchronous subscriber isolation cannot catch them.
+
+`Dispose()` now requests shutdown without blocking and releases resources after current operations and gate waiters finish.
+When deterministic cleanup is needed, the concrete bootstrap implements `IAsyncDisposable`; callers holding `IAndroidBootstrap`
+can use `if (bootstrap is IAsyncDisposable asyncDisposable) await asyncDisposable.DisposeAsync(); else bootstrap.Dispose();`.
+Await it outside callbacks. A custom dependency that ignores cancellation can delay cleanup.
+Cancellation while waiting for the gate still throws `OperationCanceledException` without changing the active operation's state;
+cancellation during verification returns a canceled result. Notification exceptions are logged and isolated, whereas a pre-check
+exception produces a failed validation result. Installed-version confirmation is still not part of disposal or a completed event.
+
+Use a single host coordinator and a private staging directory for the full check → download/verify → install sequence.
+Only hand the returned verified path to the installer; do not modify or remove the APK while installation may be reading it.
+The public installer method also supports independent calls, so it does not establish verification provenance for arbitrary paths.
+Persist the target version before handoff, reconcile the actual installed version on next launch, and clear obsolete staging files
+only when no update/installer is using them. Keep resumable partial files for a bounded retention period.
+Permission prompting, actual installation outcome, app relaunch and recovery from a bad release or data migration remain host/platform
+responsibilities; they are not made reliable merely by a successful installer intent.
+
 ## Source Review and Production Readiness
 
-### Scope and evidence
+### Remediation status
+
+The following fixes address the concrete defects identified in the original review. The historical assessment below is
+retained with revision-pinned evidence; **its defect descriptions refer to the pre-fix revision**, not the current implementation.
+
+| Finding | Current behavior | Regression coverage |
+|---|---|---|
+| B1 — retry/resume | Configured attempts cover HEAD, GET and interrupted body reads with fresh requests. Only transport failures retry; local storage failures do not. Stale 416/invalid range responses discard unsafe partial state; retries restart from zero. Resume uses `If-Range` and validates `Content-Range`; absent validators cause a full download. | `HttpResumableApkDownloaderTests`: transient statuses, dropped bodies, retry exhaustion, 200/206/416, inconsistent ranges/validators, corrupt sidecars and storage errors. |
+| B2 — terminal state | Hash cancellation returns `Canceled`; storage/permission failures return failed results. Rejected-file cleanup is best-effort and cannot replace the original failure. | `BootstrapLifecycleTests`: hash cancellation, size lookup and cleanup failures, one failure notification and released gate. |
+| B3 — client ownership | Factory-created download clients are owned and released; supplied clients remain host-owned. | `HttpResumableApkDownloaderTests`: owned versus injected client/handler disposal. The Android factory itself still needs platform-build/device validation. |
+| B4 — shutdown | `Dispose()` requests cancellation without blocking, rejects new calls, and defers resource release until active operations and waiters drain. Concrete `AndroidBootstrap.DisposeAsync()` waits for release. | `BootstrapLifecycleTests`: active operations, gate waiters, repeated disposal and disposal from callbacks. Noncooperative dependencies can still delay shutdown. |
+| B5 — timeout | Internal probe/download timeout reports `NetworkError`; caller cancellation reports `Canceled`. The overall token covers asynchronous storage writes and flushes as well as network reads. | `HttpResumableApkDownloaderTests`: caller cancellation, probe/body timeout and storage-write timeout. |
+| S1 — credential forwarding | Global download authentication is origin-scoped; additional CDN origins require host opt-in. Library-created clients do not follow redirects. | `AuthenticationOriginTests`: exact origin matching, off-origin and missing-trust cases, CDN opt-in, package-auth precedence and redirect rejection. |
+| Callback errors | Synchronous notification subscriber, dispatcher and logger exceptions cannot replace operation outcomes. A throwing pre-check fails validation instead of bypassing host policy. | `BootstrapLifecycleTests`: throwing subscribers/loggers/dispatchers and fail-closed pre-check. |
+| Package license | NuGet metadata now declares Apache-2.0, matching the existing LICENSE. | MSBuild property evaluation against LICENSE. |
+
+Validation after remediation: **160/160 core tests passed** (no failures or skips), including HEAD-rejection fallback and
+authentication-policy failures returning terminal validation results before provider/network invocation.
+The local Android build could not run because the `android` workload is missing (`NETSDK1147`); current PR CI requires approval.
+Tests for these fixes use the existing .NET core test project; they are not Android device installation tests.
+The fixes do **not** add desktop support, installer completion callbacks, automatic restart/rollback, independent manifest signing,
+APK identity preflight, persisted workflow state, directory-wide coordination, or a runnable Avalonia sample.
+UI dispatch, verified-path handoff, cache retention and next-launch reconciliation remain explicit host responsibilities described above.
+Metadata-provider/storage extensibility and production dependency/device validation remain follow-up work, not silently resolved findings.
+
+### Historical scope and evidence (before remediation)
 
 Review for issue #18, dated **2026-09-19**, against commit
 [`c3d8751`](https://github.com/GeneralLibrary/GeneralUpdate.Avalonia/commit/c3d87519de8fb97d3bebd1b1b0177b33cf0047e3).
@@ -184,8 +279,8 @@ specify `net10.0-android`, API 26+, AndroidX Core and build-time SourceLink; the
 References to GeneralUpdate.Core describe matching API semantics, not delegation to its implementation.
 
 **Verdict: not ready as a turnkey, cross-platform, closed-loop production updater.**
-It is a useful foundation for a controlled Android integration, provided the host addresses the defects and release gates below.
-This is an assessment, not a runtime remediation: the findings remain open.
+It is a useful foundation for a controlled Android integration. Concrete defects now have the fixes listed above;
+the platform boundaries and application/device release gates still apply.
 
 Classification: **bug** = source-supported incorrect behavior under the stated trigger;
 **architecture risk** = missing guarantee or integration responsibility;
@@ -228,7 +323,7 @@ Do not delete a verified APK while the external installer may still need it.
 
 ### 3. Potential bugs and security risks
 
-The following are source-confirmed findings, not failures reproduced by the existing test suite.
+The following were source-confirmed findings at the reviewed revision. See the remediation table above for fixes and new tests.
 
 | ID / priority / classification | Trigger, evidence and impact | Suggested correction / focused regression |
 |---|---|---|
@@ -281,7 +376,7 @@ shutdown and post-install reconciliation. The default logger is no-op; productio
 No dependency advisory audit or transitive inventory was performed for this assessment, so version age alone is not a vulnerability finding.
 Validate the resolved dependency graph, Android workload/toolchain compatibility and packaged artifact on supported devices before release.
 
-### Validation and production release gates
+### Original validation evidence and remaining production release gates
 
 - **Observed:** the existing Release run passed all **3** `UpdateFlowEndToEndTests`, then all **48** core tests, without skips.
   [Main CI run 35453852521](https://github.com/GeneralLibrary/GeneralUpdate.Avalonia/actions/runs/35453852521) also passed 48 tests and Android build/pack.
@@ -289,8 +384,8 @@ Validate the resolved dependency graph, Android workload/toolchain compatibility
 - **Limits:** [tests link platform-independent sources][review-tests], excluding the default factory and real Android installer.
   [Flow tests use fake HTTP, random bytes, real storage/hash and a recording installer][review-flow-tests]—not a signed APK on a device.
   No local Android workload/device was available; installer permissions, actual install/restart and Avalonia UI dispatch were not exercised.
-  This documentation-only change adds no runtime behavior or new test tooling.
-- **Before production:** address S1 for authenticated deployments and B1/B2/B4; fix B3/B5 and reconcile package license metadata.
+  Those original results predate the remediation and its new regression tests.
+- **Before production:** validate the remediation in the host application, including explicit authentication-origin configuration.
   Exercise interruption/resume (200/206/416, changed ETag, corrupt sidecar), disk-full/permission/locked-file errors,
   timeout versus cancellation, competing coordinators, subscriber exceptions and UI-thread dispatch.
 - **On real Android devices:** test denied/granted install permission, bad FileProvider paths, user cancellation, wrong package/signature,

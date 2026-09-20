@@ -3,6 +3,12 @@ using GeneralUpdate.Avalonia.Android.Models;
 
 namespace GeneralUpdate.Avalonia.Android.Abstractions;
 
+/// <summary>
+/// Coordinates serialized update operations. Notification exceptions are isolated by the default
+/// bootstrap, but callbacks must not synchronously wait for another operation on the same instance.
+/// The default bootstrap's Dispose requests cancellation without blocking; cast to IAsyncDisposable
+/// and await DisposeAsync outside callbacks when deterministic resource release is required.
+/// </summary>
 public interface IAndroidBootstrap : IDisposable
 {
     event EventHandler<ValidateEventArgs>? AddListenerValidate;
@@ -25,6 +31,8 @@ public interface IAndroidBootstrap : IDisposable
     /// <para>
     /// Like <c>GeneralUpdate.Core</c>, the callback is ignored for forced updates
     /// (<see cref="UpdatePackageInfo.IsForced"/>).
+    /// Callback exceptions fail validation and raise <see cref="AddListenerUpdateFailed"/>;
+    /// the update does not proceed when this policy decision fails.
     /// </para>
     /// </summary>
     /// <param name="func">The pre-check callback. Must not be null.</param>

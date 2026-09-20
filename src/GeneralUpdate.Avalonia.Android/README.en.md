@@ -53,6 +53,31 @@ if (check.Success && check.UpdateFound && check.PackageInfo is { } packageInfo)
 }
 ```
 
+## Host UI and Recovery
+
+Global download authentication is limited to the configured verification origin. Set
+`HttpDownloadOptions.AllowedDownloadAuthenticationOrigins` only for CDN origins trusted to receive the same credentials;
+`TrustedAuthenticationOrigin` can override the verification origin. Origin checks include scheme, host and port, not paths.
+Authenticated requests require HTTPS unless `AllowInsecureAuthentication` is explicitly enabled for development.
+Internal clients reject redirects; configure final URLs. With an injected `HttpClient`, the host must disable redirects
+and avoid unrestricted credential default headers. Per-package credentials retain precedence at the initial package URL.
+
+The default dispatcher invokes events inline; it does not marshal to the Avalonia UI thread. In the host application,
+implement `IUpdateEventDispatcher.Dispatch` using `Avalonia.Threading.Dispatcher.UIThread.Post(callback)` and pass it
+as `eventDispatcher` to `CreateDefault`. Pre-check is synchronous and is not dispatched; it should read captured policy,
+not controls. Unsubscribe ViewModel event handlers when released, throttle progress rendering, and never synchronously
+wait for another update operation inside a callback. Catch exceptions inside `async void` handlers after awaits.
+
+Use one coordinator per private staging directory, preserve the verified file while the installer may still read it, and
+persist the intended version for reconciliation on next launch. Installer launch is not installation confirmation.
+The host owns permission prompting, stale-cache retention, relaunch and failed-release/data-migration recovery.
+
+`Dispose()` cancels without blocking and defers resource release until operations and waiters drain. The concrete
+`AndroidBootstrap` also implements `IAsyncDisposable`; use it outside callbacks when cleanup must be awaited.
+Cancellation while waiting for the operation gate still throws; cancellation during verification returns a canceled result.
+Notification exceptions are isolated, but a pre-check exception fails validation rather than bypassing host policy.
+Configured download retries cover HEAD, GET and interrupted bodies, not metadata discovery or local file errors.
+
 ## API
 
 ### Factory

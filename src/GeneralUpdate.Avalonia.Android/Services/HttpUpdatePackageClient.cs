@@ -11,7 +11,8 @@ namespace GeneralUpdate.Avalonia.Android.Services;
 /// <summary>
 /// Retrieves the update package metadata published by a server without comparing the installed
 /// version or starting a download. The caller owns the supplied <see cref="HttpClient"/>,
-/// including its timeout and transport configuration.
+/// including its timeout, redirect policy and default-header configuration.
+/// Internally created clients require direct endpoints and never follow redirects.
 /// </summary>
 internal sealed class HttpUpdatePackageClient : IDisposable
 {
@@ -24,6 +25,8 @@ internal sealed class HttpUpdatePackageClient : IDisposable
     private readonly IHttpAuthProvider? _authProvider;
     private readonly IVersionComparer _versionComparer;
     private readonly bool _ownsClient;
+    private readonly Uri? _trustedAuthenticationOrigin;
+    private readonly bool _allowInsecureAuthentication;
 
     /// <summary>
     /// Creates a client from the HTTP transport settings when available, otherwise reuses
@@ -38,11 +41,13 @@ internal sealed class HttpUpdatePackageClient : IDisposable
             {
                 Timeout = httpOptions.RequestTimeout
             };
-            return new HttpUpdatePackageClient(client, httpOptions.AuthProvider, versionComparer, ownsClient: true);
+            return new HttpUpdatePackageClient(client, httpOptions.AuthProvider, versionComparer, ownsClient: true,
+                trustedAuthenticationOrigin: httpOptions.TrustedAuthenticationOrigin,
+                allowInsecureAuthentication: httpOptions.AllowInsecureAuthentication);
         }
 
         return new HttpUpdatePackageClient(
-            httpClient ?? new HttpClient(),
+            httpClient ?? new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }),
             versionComparer: versionComparer,
             ownsClient: httpClient is null);
     }
@@ -51,12 +56,16 @@ internal sealed class HttpUpdatePackageClient : IDisposable
         HttpClient httpClient,
         IHttpAuthProvider? authProvider = null,
         IVersionComparer? versionComparer = null,
-        bool ownsClient = false)
+        bool ownsClient = false,
+        Uri? trustedAuthenticationOrigin = null,
+        bool allowInsecureAuthentication = false)
     {
         _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
         _authProvider = authProvider;
         _versionComparer = versionComparer ?? new SystemVersionComparer();
         _ownsClient = ownsClient;
+        _trustedAuthenticationOrigin = trustedAuthenticationOrigin;
+        _allowInsecureAuthentication = allowInsecureAuthentication;
     }
 
     public void Dispose()
@@ -162,8 +171,14 @@ internal sealed class HttpUpdatePackageClient : IDisposable
     private async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         request.Headers.Accept.ParseAdd("application/json");
-        if (_authProvider is not null)
+        if (_authProvider is not null &&
+            (_trustedAuthenticationOrigin is null ||
+                HttpDownloadOptions.IsSameOrigin(request.RequestUri, _trustedAuthenticationOrigin)))
         {
+            if (_authProvider is not NoOpAuthProvider)
+            {
+                HttpDownloadOptions.EnsureAuthenticationTransport(request.RequestUri, _allowInsecureAuthentication);
+            }
             await _authProvider.ApplyAuthAsync(request, cancellationToken).ConfigureAwait(false);
         }
 

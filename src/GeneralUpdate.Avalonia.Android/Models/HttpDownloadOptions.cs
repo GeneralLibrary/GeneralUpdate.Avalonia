@@ -9,7 +9,8 @@ namespace GeneralUpdate.Avalonia.Android.Models;
 /// <para>
 /// When provided to <see cref="GeneralUpdateBootstrap.CreateDefault"/>,
 /// the library constructs an internal <see cref="HttpClient"/> from these settings.
-/// When null, the existing behavior is preserved (bare HttpClient, no auth, system SSL).
+/// Internally created clients do not follow redirects; configure direct verification and package URLs.
+/// Host-supplied clients remain host-owned, including responsibility for redirect and default-header safety.
 /// </para>
 /// </summary>
 public sealed record HttpDownloadOptions
@@ -61,18 +62,76 @@ public sealed record HttpDownloadOptions
     public TimeSpan RetryBaseDelay { get; init; } = TimeSpan.FromSeconds(1);
 
     /// <summary>
-    /// Global authentication provider applied to update server verification and download requests.
+    /// Global authentication provider applied to update server verification requests.
+    /// Downloads receive it only at the verification origin or an explicitly allowed download origin.
     /// Per-package authentication on <see cref="UpdatePackageInfo"/> takes precedence for downloads.
     /// </summary>
     public IHttpAuthProvider? AuthProvider { get; init; }
 
     /// <summary>
+    /// Allows global and per-package credentials over plaintext HTTP. Unsafe: use only for
+    /// explicitly trusted development endpoints. Defaults to false; authenticated requests
+    /// require HTTPS and are rejected before invoking the authentication provider otherwise.
+    /// This does not relax origin restrictions or enable redirects.
+    /// </summary>
+    public bool AllowInsecureAuthentication { get; init; }
+
+    /// <summary>
+    /// Optional trusted origin for global authentication, overriding the configured verification URL's origin.
+    /// Origin matching uses scheme, host and effective port, not URL paths.
+    /// Without either this value or a valid verification URL, downloads do not receive global credentials
+    /// unless their origin is explicitly included in <see cref="AllowedDownloadAuthenticationOrigins"/>.
+    /// </summary>
+    public Uri? TrustedAuthenticationOrigin { get; init; }
+
+    /// <summary>
+    /// Additional HTTP(S) origins explicitly trusted to receive global download credentials, such as a CDN.
+    /// Empty by default. Entries grant trust to the entire origin; paths are ignored.
+    /// Redirects are not followed even between trusted origins.
+    /// </summary>
+    public IReadOnlyCollection<Uri> AllowedDownloadAuthenticationOrigins { get; init; } = Array.Empty<Uri>();
+
+    internal bool IsDownloadAuthenticationAllowed(Uri? requestUri, string? verificationUrl)
+    {
+        var trustedOrigin = TrustedAuthenticationOrigin;
+        if (trustedOrigin is null)
+        {
+            Uri.TryCreate(verificationUrl, UriKind.Absolute, out trustedOrigin);
+        }
+
+        return IsSameOrigin(requestUri, trustedOrigin) ||
+            (AllowedDownloadAuthenticationOrigins?.Any(origin => IsSameOrigin(requestUri, origin)) ?? false);
+    }
+
+    internal static bool IsSameOrigin(Uri? destination, Uri? origin)
+        => IsHttpOrigin(destination) && IsHttpOrigin(origin) &&
+            string.Equals(destination!.Scheme, origin!.Scheme, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(destination.IdnHost, origin.IdnHost, StringComparison.OrdinalIgnoreCase) &&
+            destination.Port == origin.Port;
+
+    internal static void EnsureAuthenticationTransport(Uri? requestUri, bool allowInsecureAuthentication = false)
+    {
+        if (!IsHttpOrigin(requestUri) ||
+            (requestUri!.Scheme != Uri.UriSchemeHttps && !allowInsecureAuthentication))
+        {
+            throw new InvalidDataException(
+                "Authentication requires an HTTP(S) URI without userinfo, and HTTPS unless AllowInsecureAuthentication is explicitly enabled.");
+        }
+    }
+
+    private static bool IsHttpOrigin(Uri? uri)
+        => uri is { IsAbsoluteUri: true } &&
+            (uri.Scheme == Uri.UriSchemeHttps || uri.Scheme == Uri.UriSchemeHttp) &&
+            string.IsNullOrEmpty(uri.UserInfo);
+
+    /// <summary>
     /// Builds an <see cref="HttpClientHandler"/> from the configured options.
-    /// Applies SSL validation policy and proxy settings.
+    /// Applies SSL validation policy and proxy settings. Automatic redirects are disabled
+    /// so custom authentication headers cannot be forwarded to a different endpoint.
     /// </summary>
     internal HttpClientHandler BuildHandler()
     {
-        var handler = new HttpClientHandler();
+        var handler = new HttpClientHandler { AllowAutoRedirect = false };
 
         if (SslValidationPolicy != null)
         {

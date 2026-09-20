@@ -44,10 +44,9 @@ public static class GeneralUpdateBootstrap
         }
         else
         {
-            // Legacy path: use injected httpClient or a bare new one
-            var usedClient = httpClient ?? new HttpClient();
+            var usedClient = httpClient ?? new HttpClient(new HttpClientHandler { AllowAutoRedirect = false });
             downloader = new HttpResumableApkDownloader(
-                usedClient, usedStorage, effectiveOptions, usedLogger);
+                usedClient, usedStorage, effectiveOptions, null, ownsClient: httpClient is null, logger: usedLogger);
         }
         var validator = new Sha256HashValidator();
         var installer = new AndroidApkInstaller(

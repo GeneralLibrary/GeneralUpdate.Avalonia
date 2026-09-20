@@ -27,14 +27,20 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
     /// No authentication or custom HTTP options are applied.
     /// </summary>
     public HttpResumableApkDownloader(HttpClient httpClient, IFileStorage fileStorage, AndroidUpdateOptions options, IUpdateLogger? logger = null)
+        : this(httpClient, fileStorage, options, null, false, logger)
+    {
+    }
+
+    internal HttpResumableApkDownloader(HttpClient httpClient, IFileStorage fileStorage, AndroidUpdateOptions options,
+        HttpDownloadOptions? httpOptions, bool ownsClient, IUpdateLogger? logger = null)
     {
         _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
         _fileStorage = fileStorage ?? throw new ArgumentNullException(nameof(fileStorage));
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _logger = logger ?? new NoOpUpdateLogger();
-        _httpOptions = null;
-        _globalAuthProvider = null;
-        _ownsClient = false;
+        _httpOptions = httpOptions;
+        _globalAuthProvider = httpOptions?.AuthProvider;
+        _ownsClient = ownsClient;
     }
 
     /// <summary>
@@ -74,13 +80,6 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
 
         try
         {
-            _fileStorage.EnsureDirectory(_options.DownloadDirectoryPath);
-            var finalName = ResolveFileName(packageInfo);
-            var finalFilePath = Path.Combine(_options.DownloadDirectoryPath, finalName);
-            var tempFilePath = finalFilePath + _options.TemporaryFileExtension;
-            var sidecarPath = tempFilePath + _options.SidecarExtension;
-
-            // Resolve download timeout: use configured value or infinite
             using var timeoutCts = _httpOptions != null
                 ? new CancellationTokenSource(_httpOptions.DownloadTimeout)
                 : null;
@@ -89,113 +88,147 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
                 : null;
             var effectiveCt = linkedCts?.Token ?? cancellationToken;
 
-            // Use RequestTimeout for the HEAD probe (quick server info check)
-            using var probeCts = _httpOptions != null
-                ? new CancellationTokenSource(_httpOptions.RequestTimeout)
-                : null;
-            using var probeLinkedCts = probeCts != null
-                ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, probeCts.Token)
-                : null;
-            var probeCt = probeLinkedCts?.Token ?? cancellationToken;
+            effectiveCt.ThrowIfCancellationRequested();
+            _fileStorage.EnsureDirectory(_options.DownloadDirectoryPath);
+            var finalName = ResolveFileName(packageInfo);
+            var finalFilePath = Path.Combine(_options.DownloadDirectoryPath, finalName);
+            var tempFilePath = finalFilePath + _options.TemporaryFileExtension;
+            var sidecarPath = tempFilePath + _options.SidecarExtension;
 
-            var remoteInfo = await WithRetryAsync(
-                ct => GetRemoteInfoAsync(packageInfo, ct),
-                probeCt).ConfigureAwait(false);
-            var expectedMetadata = CreateMetadata(packageInfo, finalName, remoteInfo);
-
-            var canResume = await EnsureResumeConsistencyAsync(tempFilePath, sidecarPath, expectedMetadata, cancellationToken).ConfigureAwait(false);
-            var existingLength = canResume ? _fileStorage.GetFileLength(tempFilePath) : 0;
-            if (existingLength > 0 && !remoteInfo.AcceptRanges)
+            return await WithRetryAsync(async ct =>
             {
-                _logger.LogWarning("Server does not support range requests. Restarting download from zero.");
-                _fileStorage.DeleteFile(tempFilePath);
-                existingLength = 0;
-            }
+                var remoteInfo = await GetRemoteInfoAsync(packageInfo, ct).ConfigureAwait(false);
+                var expectedMetadata = CreateMetadata(packageInfo, finalName, remoteInfo);
 
-            using var request = new HttpRequestMessage(HttpMethod.Get, packageInfo.DownloadUrl);
-            if (existingLength > 0)
-            {
-                request.Headers.Range = new RangeHeaderValue(existingLength, null);
-            }
-
-            await ApplyAuthAsync(request, packageInfo, effectiveCt).ConfigureAwait(false);
-
-            using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, effectiveCt).ConfigureAwait(false);
-            if (existingLength > 0 && response.StatusCode == HttpStatusCode.OK)
-            {
-                _logger.LogWarning("Server did not honor range request. Restarting download from zero.");
-                _fileStorage.DeleteFile(tempFilePath);
-                existingLength = 0;
-            }
-
-            response.EnsureSuccessStatusCode();
-
-            var totalBytes = ResolveTotalBytes(packageInfo.FileSize, response.Content.Headers.ContentLength, existingLength);
-            var metadataWithResponse = expectedMetadata with
-            {
-                ETag = response.Headers.ETag?.Tag ?? expectedMetadata.ETag,
-                LastModified = response.Content.Headers.LastModified?.ToString() ?? expectedMetadata.LastModified
-            };
-
-            await _fileStorage.WriteAllTextAsync(sidecarPath, JsonSerializer.Serialize(metadataWithResponse), cancellationToken).ConfigureAwait(false);
-
-            await using var contentStream = await response.Content.ReadAsStreamAsync(effectiveCt).ConfigureAwait(false);
-            var buffer = new byte[_options.DownloadBufferSize];
-            var downloaded = existingLength;
-            var speedMeter = new SmoothedSpeedMeter(Math.Max(3, _options.SpeedSmoothingWindowSeconds));
-
-            progressCallback?.Invoke(CreateProgress(packageInfo, downloaded, totalBytes, speedMeter.GetSpeed(downloaded), existingLength > 0 ? "Resuming" : "Downloading"));
-
-            // The write stream is flushed and closed before the temporary file is renamed:
-            // PhysicalFileStorage opens files with FileShare.None, so renaming an open file fails on
-            // Windows, and skipping the flush could leave trailing bytes behind on other platforms.
-            await using (var fileStream = _fileStorage.OpenWrite(tempFilePath, append: existingLength > 0))
-            {
-                while (true)
+                var canResume = await EnsureResumeConsistencyAsync(tempFilePath, sidecarPath, expectedMetadata, ct).ConfigureAwait(false);
+                var existingLength = canResume ? _fileStorage.GetFileLength(tempFilePath) : 0;
+                var ifRange = CreateIfRange(expectedMetadata);
+                if (existingLength > 0 && (!remoteInfo.AcceptRanges || ifRange is null))
                 {
-                    var read = await contentStream.ReadAsync(buffer.AsMemory(0, buffer.Length), effectiveCt).ConfigureAwait(false);
-                    if (read <= 0)
-                    {
-                        break;
-                    }
-
-                    await fileStream.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
-                    downloaded += read;
-                    var speed = speedMeter.GetSpeed(downloaded);
-
-                    progressCallback?.Invoke(CreateProgress(packageInfo, downloaded, totalBytes, speed, "Downloading"));
+                    _logger.LogWarning("Safe range resumption is unavailable. Restarting download from zero.");
+                    ct.ThrowIfCancellationRequested();
+                    _fileStorage.DeleteFile(tempFilePath);
+                    existingLength = 0;
                 }
-            }
 
-            if (_fileStorage.FileExists(finalFilePath))
-            {
-                _fileStorage.DeleteFile(finalFilePath);
-            }
+                using var request = new HttpRequestMessage(HttpMethod.Get, packageInfo.DownloadUrl);
+                if (existingLength > 0)
+                {
+                    request.Headers.Range = new RangeHeaderValue(existingLength, null);
+                    request.Headers.IfRange = ifRange;
+                }
 
-            _fileStorage.MoveFile(tempFilePath, finalFilePath, overwrite: true);
-            _fileStorage.DeleteFile(sidecarPath);
+                await ApplyAuthAsync(request, packageInfo, ct).ConfigureAwait(false);
 
-            progressCallback?.Invoke(CreateProgress(packageInfo, downloaded, totalBytes, speedMeter.GetSpeed(downloaded), "Download completed"));
+                using var response = await SendAsync(request, ct).ConfigureAwait(false);
+                if (existingLength > 0 && response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    _fileStorage.DeleteFile(tempFilePath);
+                    _fileStorage.DeleteFile(sidecarPath);
+                    throw new HttpRequestException("The partial download is stale; restart from zero.");
+                }
+                if (existingLength > 0 && response.StatusCode == HttpStatusCode.OK)
+                {
+                    _logger.LogWarning("Server did not honor range request. Restarting download from zero.");
+                    ct.ThrowIfCancellationRequested();
+                    _fileStorage.DeleteFile(tempFilePath);
+                    existingLength = 0;
+                }
 
-            return new DownloadResult
-            {
-                Success = true,
-                State = UpdateState.Completed,
-                FailureReason = UpdateFailureReason.None,
-                Message = "Download finished.",
-                PackageInfo = packageInfo,
-                FilePath = finalFilePath
-            };
+                response.EnsureSuccessStatusCode();
+                if (response.StatusCode is not (HttpStatusCode.OK or HttpStatusCode.PartialContent))
+                {
+                    throw new HttpRequestException("Unexpected status for a package download.", null, response.StatusCode);
+                }
+                if (response.StatusCode == HttpStatusCode.PartialContent &&
+                    !IsValidRange(response, existingLength, expectedMetadata))
+                {
+                    ct.ThrowIfCancellationRequested();
+                    _fileStorage.DeleteFile(tempFilePath);
+                    _fileStorage.DeleteFile(sidecarPath);
+                    throw new HttpRequestException("The server returned an inconsistent Content-Range.");
+                }
+
+                var totalBytes = ResolveTotalBytes(packageInfo.FileSize, response.Content.Headers.ContentLength, existingLength);
+                var metadataWithResponse = expectedMetadata with
+                {
+                    ETag = response.Headers.ETag?.ToString() ?? expectedMetadata.ETag,
+                    LastModified = response.Content.Headers.LastModified?.ToString() ?? expectedMetadata.LastModified
+                };
+
+                await _fileStorage.WriteAllTextAsync(sidecarPath, JsonSerializer.Serialize(metadataWithResponse), ct).ConfigureAwait(false);
+
+                await using var contentStream = await ReadNetworkAsync(
+                    () => response.Content.ReadAsStreamAsync(ct), ct).ConfigureAwait(false);
+                var buffer = new byte[_options.DownloadBufferSize];
+                var downloaded = existingLength;
+                var speedMeter = new SmoothedSpeedMeter(Math.Max(3, _options.SpeedSmoothingWindowSeconds));
+
+                progressCallback?.Invoke(CreateProgress(packageInfo, downloaded, totalBytes, speedMeter.GetSpeed(downloaded), existingLength > 0 ? "Resuming" : "Downloading"));
+
+                // Close the flushed write stream before moving the file (FileShare.None on Windows).
+                ct.ThrowIfCancellationRequested();
+                await using (var fileStream = _fileStorage.OpenWrite(tempFilePath, append: existingLength > 0))
+                {
+                    while (true)
+                    {
+                        var read = await ReadNetworkAsync(
+                            () => contentStream.ReadAsync(buffer.AsMemory(0, buffer.Length), ct).AsTask(), ct).ConfigureAwait(false);
+                        if (read <= 0)
+                        {
+                            break;
+                        }
+
+                        await fileStream.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
+                        downloaded += read;
+                        var speed = speedMeter.GetSpeed(downloaded);
+
+                        progressCallback?.Invoke(CreateProgress(packageInfo, downloaded, totalBytes, speed, "Downloading"));
+                    }
+                    await fileStream.FlushAsync(ct).ConfigureAwait(false);
+                }
+
+                var expectedBodyLength = response.Content.Headers.ContentLength;
+                if ((expectedBodyLength.HasValue && downloaded - existingLength != expectedBodyLength.Value) ||
+                    (response.Content.Headers.ContentRange?.Length is long rangeLength && downloaded != rangeLength) ||
+                    (expectedMetadata.ExpectedFileSize > 0 && downloaded != expectedMetadata.ExpectedFileSize))
+                {
+                    throw new HttpRequestException("The response body length does not match the expected package length.");
+                }
+
+                ct.ThrowIfCancellationRequested();
+                if (_fileStorage.FileExists(finalFilePath))
+                {
+                    _fileStorage.DeleteFile(finalFilePath);
+                }
+
+                _fileStorage.MoveFile(tempFilePath, finalFilePath, overwrite: true);
+                _fileStorage.DeleteFile(sidecarPath);
+
+                progressCallback?.Invoke(CreateProgress(packageInfo, downloaded, totalBytes, speedMeter.GetSpeed(downloaded), "Download completed"));
+
+                return new DownloadResult
+                {
+                    Success = true,
+                    State = UpdateState.Completed,
+                    FailureReason = UpdateFailureReason.None,
+                    Message = "Download finished.",
+                    PackageInfo = packageInfo,
+                    FilePath = finalFilePath
+                };
+            }, effectiveCt).ConfigureAwait(false);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException ex)
         {
             return new DownloadResult
             {
                 Success = false,
-                State = UpdateState.Canceled,
-                FailureReason = UpdateFailureReason.Canceled,
-                Message = "Download canceled.",
-                PackageInfo = packageInfo
+                State = cancellationToken.IsCancellationRequested ? UpdateState.Canceled : UpdateState.Failed,
+                FailureReason = cancellationToken.IsCancellationRequested ? UpdateFailureReason.Canceled : UpdateFailureReason.NetworkError,
+                Message = cancellationToken.IsCancellationRequested ? "Download canceled." : "Download timed out.",
+                PackageInfo = packageInfo,
+                Exception = ex
             };
         }
         catch (HttpRequestException ex)
@@ -210,7 +243,7 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
                 Exception = ex
             };
         }
-        catch (IOException ex)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             return new DownloadResult
             {
@@ -238,20 +271,82 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
 
     private async Task<(string? ETag, string? LastModified, long? ContentLength, bool AcceptRanges)> GetRemoteInfoAsync(UpdatePackageInfo packageInfo, CancellationToken cancellationToken)
     {
-        using var headRequest = new HttpRequestMessage(HttpMethod.Head, packageInfo.DownloadUrl);
-        await ApplyAuthAsync(headRequest, packageInfo, cancellationToken).ConfigureAwait(false);
-        using var headResponse = await _httpClient.SendAsync(headRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
-        if (!headResponse.IsSuccessStatusCode)
+        using var probeCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        if (_httpOptions != null)
         {
-            return (null, null, null, false);
+            probeCts.CancelAfter(_httpOptions.RequestTimeout);
         }
+        using var headRequest = new HttpRequestMessage(HttpMethod.Head, packageInfo.DownloadUrl);
+        try
+        {
+            await ApplyAuthAsync(headRequest, packageInfo, probeCts.Token).ConfigureAwait(false);
+            using var headResponse = await SendAsync(headRequest, probeCts.Token).ConfigureAwait(false);
+            // Some GET-signed URLs reject HEAD. Probe rejection must not prevent a fresh GET;
+            // redirects remain rejected and transient failures still consume the retry budget.
+            if ((int)headResponse.StatusCode >= 400 && !IsTransientStatus(headResponse.StatusCode))
+            {
+                return (null, null, null, false);
+            }
+            headResponse.EnsureSuccessStatusCode();
+            var acceptRanges = headResponse.Headers.AcceptRanges.Any(r => string.Equals(r, "bytes", StringComparison.OrdinalIgnoreCase));
+            return (
+                headResponse.Headers.ETag?.ToString(),
+                headResponse.Content.Headers.LastModified?.ToString(),
+                headResponse.Content.Headers.ContentLength,
+                acceptRanges);
+        }
+        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new HttpRequestException("The HEAD probe timed out.", ex);
+        }
+    }
 
-        var acceptRanges = headResponse.Headers.AcceptRanges.Any(r => string.Equals(r, "bytes", StringComparison.OrdinalIgnoreCase));
-        return (
-            headResponse.Headers.ETag?.Tag,
-            headResponse.Content.Headers.LastModified?.ToString(),
-            headResponse.Content.Headers.ContentLength,
-            acceptRanges);
+    private Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+        ReadNetworkAsync(() => _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken), cancellationToken);
+
+    // Only transport reads are translated; local file I/O must not trigger network retries.
+    private static async Task<T> ReadNetworkAsync<T>(Func<Task<T>> read, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await read().ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or TimeoutException ||
+                                   ex is OperationCanceledException && !cancellationToken.IsCancellationRequested)
+        {
+            throw new HttpRequestException("The network transfer was interrupted.", ex);
+        }
+    }
+
+    private static RangeConditionHeaderValue? CreateIfRange(DownloadResumeMetadata metadata)
+    {
+        if (EntityTagHeaderValue.TryParse(metadata.ETag, out var etag) && !etag.IsWeak)
+        {
+            return new RangeConditionHeaderValue(etag);
+        }
+        return DateTimeOffset.TryParse(metadata.LastModified, out var modified)
+            ? new RangeConditionHeaderValue(modified)
+            : null;
+    }
+
+    private static bool IsValidRange(HttpResponseMessage response, long offset, DownloadResumeMetadata metadata)
+    {
+        var range = response.Content.Headers.ContentRange;
+        if (range is null || !string.Equals(range.Unit, "bytes", StringComparison.OrdinalIgnoreCase) ||
+            range.From != offset || !range.To.HasValue || !range.Length.HasValue ||
+            range.To != range.Length - 1 ||
+            (metadata.ExpectedFileSize > 0 && range.Length != metadata.ExpectedFileSize) ||
+            (response.Content.Headers.ContentLength.HasValue &&
+             response.Content.Headers.ContentLength != range.To - range.From + 1))
+        {
+            return false;
+        }
+        if (offset == 0) return true;
+        if (response.Headers.ETag != null && metadata.ETag != null &&
+            response.Headers.ETag.ToString() != metadata.ETag) return false;
+        if (response.Content.Headers.LastModified != null && metadata.LastModified != null &&
+            response.Content.Headers.LastModified.Value.ToString() != metadata.LastModified) return false;
+        return true;
     }
 
     private async Task ApplyAuthAsync(HttpRequestMessage request, UpdatePackageInfo packageInfo, CancellationToken cancellationToken)
@@ -270,7 +365,8 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
         }
 
         // Fall back to global auth when per-package is not set or not configured
-        if ((provider is null || provider is NoOpAuthProvider) && _globalAuthProvider != null)
+        if ((provider is null || provider is NoOpAuthProvider) && _globalAuthProvider != null &&
+            _httpOptions?.IsDownloadAuthenticationAllowed(request.RequestUri, _options.UpdateServer?.RequestUrl) == true)
         {
             if (packageInfo.AuthScheme.HasValue)
             {
@@ -279,20 +375,17 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
             provider = _globalAuthProvider;
         }
 
-        if (provider != null)
+        if (provider is not null and not NoOpAuthProvider)
         {
+            HttpDownloadOptions.EnsureAuthenticationTransport(
+                request.RequestUri, _httpOptions?.AllowInsecureAuthentication == true);
             await provider.ApplyAuthAsync(request, cancellationToken).ConfigureAwait(false);
         }
     }
 
     private async Task<T> WithRetryAsync<T>(Func<CancellationToken, Task<T>> action, CancellationToken cancellationToken)
     {
-        if (_httpOptions == null || _httpOptions.MaxRetryAttempts <= 1)
-        {
-            return await action(cancellationToken).ConfigureAwait(false);
-        }
-
-        var maxAttempts = _httpOptions.MaxRetryAttempts;
+        var maxAttempts = Math.Max(1, _httpOptions?.MaxRetryAttempts ?? 1);
 
         for (var attempt = 0; ; attempt++)
         {
@@ -302,29 +395,26 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
             {
                 return await action(cancellationToken).ConfigureAwait(false);
             }
-            catch (Exception ex) when (attempt < maxAttempts - 1 && IsTransient(ex))
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested && attempt < maxAttempts - 1 && IsTransient(ex))
             {
                 var delay = TimeSpan.FromMilliseconds(
-                    _httpOptions.RetryBaseDelay.TotalMilliseconds * Math.Pow(2, attempt));
+                    Math.Min(int.MaxValue, Math.Max(0, _httpOptions!.RetryBaseDelay.TotalMilliseconds) * Math.Pow(2, attempt)));
                 _logger.LogWarning($"Download attempt {attempt + 1} failed with transient error. Retrying in {delay.TotalMilliseconds}ms. {ex.GetType().Name}: {ex.Message}");
                 await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
             }
         }
     }
 
-    private static bool IsTransient(Exception ex) => ex switch
-    {
-        TimeoutException => true,
-        OperationCanceledException => false,
-        IOException ioe when ioe.InnerException is TimeoutException => true,
-        HttpRequestException hre => hre.StatusCode is
-            HttpStatusCode.RequestTimeout or
-            HttpStatusCode.InternalServerError or
-            HttpStatusCode.BadGateway or
-            HttpStatusCode.ServiceUnavailable or
-            HttpStatusCode.GatewayTimeout,
-        _ => false
-    };
+    private static bool IsTransient(Exception ex) =>
+        ex is HttpRequestException hre && IsTransientStatus(hre.StatusCode);
+
+    private static bool IsTransientStatus(HttpStatusCode? status) => status is null or
+        HttpStatusCode.RequestTimeout or
+        HttpStatusCode.TooManyRequests or
+        HttpStatusCode.InternalServerError or
+        HttpStatusCode.BadGateway or
+        HttpStatusCode.ServiceUnavailable or
+        HttpStatusCode.GatewayTimeout;
 
     private async Task<bool> EnsureResumeConsistencyAsync(
         string tempFilePath,
@@ -332,6 +422,7 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
         DownloadResumeMetadata expected,
         CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (!_fileStorage.FileExists(tempFilePath))
         {
             return false;
@@ -370,12 +461,12 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
 
     private static bool CanResume(DownloadResumeMetadata expected, DownloadResumeMetadata actual)
     {
-        if (!string.Equals(expected.DownloadUrl, actual.DownloadUrl, StringComparison.OrdinalIgnoreCase)) return false;
+        if (!string.Equals(expected.DownloadUrl, actual.DownloadUrl, StringComparison.Ordinal)) return false;
         if (!string.Equals(expected.ExpectedSha256, actual.ExpectedSha256, StringComparison.OrdinalIgnoreCase)) return false;
         if (expected.ExpectedFileSize > 0 && actual.ExpectedFileSize > 0 && expected.ExpectedFileSize != actual.ExpectedFileSize) return false;
         if (!string.Equals(expected.FileName, actual.FileName, StringComparison.OrdinalIgnoreCase)) return false;
-        if (!string.IsNullOrWhiteSpace(expected.ETag) && !string.IsNullOrWhiteSpace(actual.ETag) && !string.Equals(expected.ETag, actual.ETag, StringComparison.Ordinal)) return false;
-        if (!string.IsNullOrWhiteSpace(expected.LastModified) && !string.IsNullOrWhiteSpace(actual.LastModified) && !string.Equals(expected.LastModified, actual.LastModified, StringComparison.Ordinal)) return false;
+        if (!string.Equals(expected.ETag, actual.ETag, StringComparison.Ordinal)) return false;
+        if (!string.Equals(expected.LastModified, actual.LastModified, StringComparison.Ordinal)) return false;
         return true;
     }
 

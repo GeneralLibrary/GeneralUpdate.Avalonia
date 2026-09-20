@@ -146,6 +146,29 @@ UpdateOperationResult (基类)
 
 `UpdateFailureReason`: `None`, `NetworkError`, `Canceled`, `InvalidMetadata`, `FileIoError`, `HashMismatch`, `ServerDoesNotSupportRange`, `InstallPermissionDenied`, `InstallLaunchFailed`, `VersionComparisonFailed`, `Unknown`
 
+## UI 调度与恢复责任
+
+全局下载认证默认仅发送到版本查询端点的源（协议、主机、有效端口，不按路径限制）。
+只有明确可信且允许接收相同凭据的 CDN 才应加入 `HttpDownloadOptions.AllowedDownloadAuthenticationOrigins`；
+`TrustedAuthenticationOrigin` 可覆盖默认查询源。认证默认要求 HTTPS，`AllowInsecureAuthentication`
+仅作为开发环境的显式不安全选项。内部 HTTP 客户端不跟随重定向，需配置最终地址；
+注入自有 `HttpClient` 时，宿主必须自行禁用重定向并避免无范围限制的默认认证头。
+
+默认事件分发器直接调用回调，不保证 Avalonia UI 线程。在宿主实现 `IUpdateEventDispatcher`，
+通过 `Avalonia.Threading.Dispatcher.UIThread.Post(callback)` 分发事件，并传入 `CreateDefault`。
+pre-check 是同步策略判断，不经过 UI 分发器；应读取已捕获的策略数据，而不是操作控件。
+ViewModel 释放时使用 `-=` 解绑事件，对高频进度做合并；不要在回调中通过 `.Wait()` / `.Result`
+同步等待其他更新操作或异步释放。`async void` 事件处理器须自行捕获 `await` 之后的异常。
+
+每个应用私有下载目录仅使用一个流程协调器，安装器可能仍在读取 APK 时不要修改或删除它。
+拉起安装器前持久化目标版本，在下次启动时核对实际安装版本。安装权限引导、过期缓存保留策略、
+应用重启、失败版本恢复及数据迁移回退均由宿主负责，安装器拉起成功不代表更新已经完成。
+
+`Dispose()` 非阻塞地请求取消，待操作和等待者退出后再释放资源。具体类 `AndroidBootstrap` 还实现
+`IAsyncDisposable`，需要等待清理时可在回调之外使用。等待操作锁时取消仍抛出异常，校验期间取消则返回取消结果。
+通知回调异常被隔离；pre-check 异常会让验证失败而不是绕过策略。配置的下载重试覆盖 HEAD、GET 和中断的正文读取，
+不包含元数据查询或本地文件错误。
+
 ## Android 接入配置
 
 申报安装权限（Android 8.0+）：缺少时 `LaunchInstallerAsync` 返回 `InstallPermissionDenied`，
