@@ -22,6 +22,7 @@
 - **可扩展架构**：`IVersionComparer`、`IUpdateDownloader`、`IHashValidator`、`IApkInstaller` 等均可替换。  
 - **断点续传下载**：支持 sidecar 元数据与流式写入，提升弱网场景稳定性。  
 - **统一事件通知**：提供验证、进度、完成、失败等事件用于 UI/日志集成。  
+- **持久化协调器**：完整流程串行化、待安装状态跟踪、下次启动版本确认以及显式恢复。
 
 ## 快速开始
 
@@ -90,6 +91,51 @@ if (check.Success && check.UpdateFound && check.PackageInfo is { } packageInfo)
     }
 }
 ```
+
+### 完整流程协调与下次启动确认
+
+新接入可使用 `GeneralUpdateBootstrap.CreateCoordinator(options)`，无需自行串联三个低层调用。
+协调器按“查询 → 下载并验证 → 持久化意图 → 拉起安装器”执行；`CreateDefault` 低层 API 保持兼容。
+
+```csharp
+using GeneralUpdate.Avalonia.Android.Enums;
+
+await using var coordinator = GeneralUpdateBootstrap.CreateCoordinator(options);
+coordinator.StateChanged += (_, args) =>
+    Console.WriteLine($"{args.Result.Stage}: {args.Result.Outcome}");
+
+// installedVersion 必须来自当前实际安装的应用，不能传服务端目标版本。
+var startup = await coordinator.ReconcileAsync(installedVersion, cancellationToken);
+if (startup.Outcome == UpdateCoordinatorOutcome.NoPendingUpdate)
+{
+    // 由宿主更新命令/策略触发，不要在通知回调里同步等待此调用。
+    var result = await coordinator.RunAsync(installedVersion, cancellationToken);
+}
+```
+
+- `RunAsync`：串行执行整个流程；存在待确认记录时返回 `PendingUpdateExists`，不会覆盖并再次安装。
+- `ReconcileAsync`：离线核对待确认目标版本。实际版本达到或超过目标才返回 `Updated`；
+  仍为旧版本则返回 `AwaitingInstallation` 或 `RecoveryRequired`，没有记录为 `NoPendingUpdate`。
+- `RetryAsync`：显式恢复，先核对安装版本，再重新查询服务器并下载验证同一目标；若服务端目标改变，
+  返回 `RecoveryRequired` 并保留原交接记录，需先核对或明确放弃后再开始新尝试。
+  不会安装从磁盘恢复的任意路径，也不会重复安装已经达到的目标版本。
+- `AbandonAsync`：显式放弃跟踪，也可清除损坏状态；不取消系统安装、不删除 APK、不回滚应用或数据。
+
+默认状态保存在 `<NoBackupFilesDir>/generalupdate/pending-update.json`，不是可被清理的 APK 缓存。
+只记录 schema、尝试 ID、原始/目标版本、时间和交接阶段，不保存 URL、APK 路径、凭据或异常。
+状态通过同目录临时文件刷新后原子替换；安装前保存失败就停止，安装交接后的不确定状态留待下次启动核对。
+损坏、过大或未知 schema 不会被当成“无更新”，而是明确失败。可注入 `IPendingUpdateStore`；
+自定义文件位置必须是应用私有持久化目录，不应参与备份恢复。
+默认 JSON 存储对整个流程持有 `.lock` 文件独占租约，协调使用同一路径的实例/进程；使用中不要删除锁文件。
+自定义存储可实现 `IPendingUpdateStoreLeaseProvider`，否则宿主必须保证单协调器。不同状态路径不能保护共用的 APK 目录。
+
+保持协调器与宿主更新服务相同生命周期，释放时可 `await DisposeAsync()`。
+`StateChanged` 区分阶段与最终 `Outcome`，`InstallerLaunched` 仅表示交接，不能展示为安装成功。
+UI 线程仍需传入 `IUpdateEventDispatcher`；应用每次启动及从安装器返回时调用 `ReconcileAsync`。
+协调器还转发 `AddListenerDownloadProgressChanged` 和 `AddListenerUpdatePrecheck`，无需获取内部 bootstrap；
+pre-check 应在开始操作前注册，仍保持 `true` 表示跳过、强制更新不调用的兼容语义。
+旧版本仍在运行不等于用户拒绝安装，可能尚未完成；应由用户明确选择重试或放弃，不要自动循环。
+此核心闭环确认的是实际安装版本，不是应用健康或数据迁移成功；静默安装、自动重启、系统回滚仍不提供。
 
 ### 服务端版本校验
 
@@ -167,6 +213,41 @@ ZIP、差分包、驱动包不会交给 Android 安装器；`body` 为空数组�
 
 `LaunchInstallerAsync` 返回 `Success = true` 只表示安装器已拉起，**不代表用户已完成安装**：安装完成后进程会被
 系统结束，下次启动时请自行比较本机版本与服务端版本，以确认这次更新是否真正生效。
+
+## 源码评审与生产可用性
+
+针对 #18 的评审基于 **2026-09-19 / `c3d8751`**，完整证据、源码行号、问题优先级及验收建议见
+[英文评审正文](https://github.com/GeneralLibrary/GeneralUpdate.Avalonia/blob/main/README-EN.md#source-review-and-production-readiness)。
+下表保留原始评审背景；当前已按项修复 B1–B5、S1、回调异常隔离及许可证元数据，详见正文的修复状态表。
+新增回归测试覆盖重试/续传、超时与取消、状态及清理失败、资源释放竞争、认证源限制和重定向拒绝。
+此前缺陷修复后的核心测试 **160/160 通过**；当时本地 Android 构建因缺少工作负载（`NETSDK1147`）受阻。
+本次协调器新增验证：**57 个专项测试、全部 217 个核心测试通过**；安装 Android 工作负载后，
+包含默认工厂的 Android 库 **Release 构建成功**。覆盖真实下载器、文件及哈希处理与模拟网络/安装器、
+协调器重建后的持久化确认、不确定交接、并发及恢复。构建仍报告已有的
+`Microsoft.Build.Tasks.Git` 8.0.0 安全公告（[GHSA-23fw-v26w-5fgq](https://github.com/advisories/GHSA-23fw-v26w-5fgq)）
+和 3 个 XML 文档警告；未修改依赖版本，PR CI 仍需批准，尚未进行真机/模拟器安装、重启或应用健康验证。
+这些测试不等价于真机安装或自动回滚验证。
+
+| 维度 | 结论与风险 | 建议 |
+|---|---|---|
+| 更新闭环 | 当前仅实现 Android 版本查询、断点下载、大小/SHA-256 校验和安装器拉起。安装器拉起成功不等于安装完成；没有重启确认、持久化恢复或应用级回滚。 | 宿主持久化目标版本、下次启动核对实际版本，并制定失败版本及数据迁移恢复策略。分别处理弱网、文件权限、磁盘空间、损坏包和安装权限问题。 |
+| 开发者友好性 | 有 API、服务端协议和 FileProvider 配置说明，但没有可运行的 Avalonia 示例。无内置 UI，定制自由但接入工作由宿主承担；不是桌面跨平台更新实现。 | 增加 MVVM 接入示例，覆盖 UI 调度、权限返回、取消、事件解绑及安装后确认；说明 pre-check 返回 `true` 表示跳过。 |
+| 潜在 Bug | 完整正文列出下载重试范围不符（B1）、哈希取消/清理异常后的状态残留（B2）、默认下载 HttpClient 所有权遗漏（B3）、操作期间 Dispose 的竞争（B4）、超时被标成主动取消（B5）。全局认证还可能发送给元数据指定的其他下载域名（S1，需配置全局凭据且攻击者控制相关地址/主机）。 | 按触发条件补回归测试并修复；认证必须限定可信源。默认事件不保证 UI 线程，需注入 Avalonia 调度器；SHA-256 不等于独立签名，应使用可信 HTTPS，保留 Android 自身签名校验边界。 |
+| 架构设计 | 核心无 UI，也没有引用 GeneralUpdate.Core 包；接口注入利于测试、适配 MVVM。但元数据客户端内置、默认哈希直接访问物理文件，操作锁只覆盖单实例的单次调用。 | 由宿主统一协调流程及生命周期；按需抽象元数据发现与存储，避免多实例共用下载路径，补充遥测和依赖兼容性验证。 |
+
+**分类说明：** B1–B5 是有明确源码触发路径的行为缺陷，S1 是有前提的凭据泄露风险；
+无安装完成确认/回滚、无 UI 调度保证属于架构或接入责任，示例与 API 易用性属于体验优化。
+原包元数据 MIT 与仓库 Apache-2.0 的差异已按现有 LICENSE 修正为 Apache-2.0。
+
+**原始验证边界：** 修复前的 3 个流程测试和全部 48 个核心测试通过；当时主分支 CI 的 Android 构建/打包也通过。
+测试使用模拟 HTTP、真实文件/哈希及记录型安装器，不覆盖真机安装、签名拒绝、Avalonia UI 线程或重启恢复。
+没有证据支持把旧的“写流未关闭即重命名”问题、Zip Slip 或 Android 签名绕过列为当前缺陷。
+
+**生产结论：不能直接作为开箱即用的跨平台、全闭环生产更新器。**
+新增协调器已提供持久化意图、下次启动的安装版本确认、完整流程串行化及重试/放弃恢复。
+仍未新增桌面支持、原生安装器完成回调、自动重启/回滚、独立清单签名、APK 身份预检或可运行的 Avalonia 示例。
+仍需限定可信更新源、在宿主启动时调用核对并处理平台权限和健康恢复，并通过 Android 真机故障场景验收后，
+作为 Android 更新基础组件使用；详细上线门槛见完整评审。
 
 ## 目录结构
 

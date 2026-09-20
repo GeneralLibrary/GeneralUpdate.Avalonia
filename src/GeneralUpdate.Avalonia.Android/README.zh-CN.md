@@ -146,6 +146,56 @@ UpdateOperationResult (基类)
 
 `UpdateFailureReason`: `None`, `NetworkError`, `Canceled`, `InvalidMetadata`, `FileIoError`, `HashMismatch`, `ServerDoesNotSupportRange`, `InstallPermissionDenied`, `InstallLaunchFailed`, `VersionComparisonFailed`, `Unknown`
 
+## 持久化流程协调器（推荐）
+
+`GeneralUpdateBootstrap.CreateCoordinator(options)` 返回 `IAndroidUpdateCoordinator`，原有低层 API 保持不变。
+使用相同的服务器、FileProvider 和安装权限配置，并传入当前**实际安装版本**：
+
+- `RunAsync`：查询 → 下载并验证 → 持久化意图 → 安装交接，整个尝试串行化；已有记录返回 `PendingUpdateExists`。
+- `ReconcileAsync`：下次启动/从安装器返回时离线核对；实际版本达到或超过目标才返回 `Updated`。
+- `RetryAsync`：显式恢复待确认尝试，先核对再重新查询、下载和验证同一目标，不安装持久化路径。
+  服务端目标改变则返回 `RecoveryRequired` 并保留原记录，需核对/明确放弃；没有记录时用 `RunAsync` 开始新尝试。
+- `AbandonAsync`：放弃跟踪（也可恢复损坏的状态文件），不删除 APK、不取消系统安装、不回滚。
+
+`StateChanged` 区分阶段与最终 `Outcome`，`InstallerLaunched` 不等于安装完成。默认将最小化版本化记录
+保存在 `<NoBackupFilesDir>/generalupdate/pending-update.json`，同目录写入并刷新临时文件后原子替换。
+记录仅含尝试 ID、原始/目标版本、时间和阶段，不保存 URL、文件路径、凭据或异常。
+可通过 `pendingStore` 注入私有持久化 `IPendingUpdateStore`，不应使用缓存或备份恢复目录。
+默认存储持有跨协作实例/进程的完整流程 `.lock` 独占租约；使用中不要删除锁文件。
+自定义存储可实现 `IPendingUpdateStoreLeaseProvider`，否则需单协调器；不同状态文件不能保护共享的 APK 目录。
+状态损坏会明确失败，安装前持久化失败会阻止交接；不确定的交接保留待确认状态。
+
+通过 `eventDispatcher` 接入 UI 线程，不要混用直接 bootstrap 调用。协调器包括等待锁在内的取消均返回 `Canceled`；
+下载进度与 pre-check 通过 `AddListenerDownloadProgressChanged` / `AddListenerUpdatePrecheck` 转发。
+操作前注册策略，`true` 仍表示跳过可选更新，强制更新绕过该回调。
+工厂协调器拥有其 bootstrap，直接构造默认不拥有。支持 `await using`，异步释放应在回调之外等待。
+旧版本可能仍处于安装等待中，不应自动重试；宿主明确决定重试/放弃。
+此闭环确认已观察到的安装版本，不保证应用健康、数据迁移成功、静默安装、自动重启或系统回滚。
+
+## UI 调度与恢复责任
+
+全局下载认证默认仅发送到版本查询端点的源（协议、主机、有效端口，不按路径限制）。
+只有明确可信且允许接收相同凭据的 CDN 才应加入 `HttpDownloadOptions.AllowedDownloadAuthenticationOrigins`；
+`TrustedAuthenticationOrigin` 可覆盖默认查询源。认证默认要求 HTTPS，`AllowInsecureAuthentication`
+仅作为开发环境的显式不安全选项。内部 HTTP 客户端不跟随重定向，需配置最终地址；
+注入自有 `HttpClient` 时，宿主必须自行禁用重定向并避免无范围限制的默认认证头。
+
+默认事件分发器直接调用回调，不保证 Avalonia UI 线程。在宿主实现 `IUpdateEventDispatcher`，
+通过 `Avalonia.Threading.Dispatcher.UIThread.Post(callback)` 分发事件，并传入 `CreateDefault`。
+pre-check 是同步策略判断，不经过 UI 分发器；应读取已捕获的策略数据，而不是操作控件。
+ViewModel 释放时使用 `-=` 解绑事件，对高频进度做合并；不要在回调中通过 `.Wait()` / `.Result`
+同步等待其他更新操作或异步释放。`async void` 事件处理器须自行捕获 `await` 之后的异常。
+
+每个应用私有下载目录仅使用一个流程协调器，安装器可能仍在读取 APK 时不要修改或删除它。
+使用协调器时由其持久化目标版本，宿主在下次启动时调用 `ReconcileAsync` 核对实际安装版本；
+直接使用低层 API 时则自行实现此跟踪。安装权限引导、过期缓存保留策略、
+应用重启、失败版本恢复及数据迁移回退均由宿主负责，安装器拉起成功不代表更新已经完成。
+
+`Dispose()` 非阻塞地请求取消，待操作和等待者退出后再释放资源。具体类 `AndroidBootstrap` 还实现
+`IAsyncDisposable`，需要等待清理时可在回调之外使用。等待操作锁时取消仍抛出异常，校验期间取消则返回取消结果。
+通知回调异常被隔离；pre-check 异常会让验证失败而不是绕过策略。配置的下载重试覆盖 HEAD、GET 和中断的正文读取，
+不包含元数据查询或本地文件错误。
+
 ## Android 接入配置
 
 申报安装权限（Android 8.0+）：缺少时 `LaunchInstallerAsync` 返回 `InstallPermissionDenied`，

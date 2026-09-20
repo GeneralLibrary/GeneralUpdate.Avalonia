@@ -13,6 +13,7 @@ UI-free Android auto-update core for Avalonia 12+ apps (`net10.0-android`).
 - Resumable HTTP download with sidecar metadata and smoothed speed reporting
 - Replaceable abstractions for every pipeline stage
 - Operation serialization — concurrent calls are gated, safe from any thread
+- Durable coordination — pending-install tracking, next-launch version reconciliation, and explicit retry/abandon
 
 ## Quick Start
 
@@ -52,6 +53,61 @@ if (check.Success && check.UpdateFound && check.PackageInfo is { } packageInfo)
     }
 }
 ```
+
+## Durable Coordinator (recommended)
+
+Use `GeneralUpdateBootstrap.CreateCoordinator(options)` for whole-flow orchestration with the same server/FileProvider
+configuration. It returns `IAndroidUpdateCoordinator`, supporting `await using`, `StateChanged`, and:
+
+- `RunAsync(installedVersion, ct)`: check → download/verify → durably record intent → installer handoff.
+- `ReconcileAsync(installedVersion, ct)`: offline next-launch confirmation; only a version at or above the pending target
+  returns `Updated`. `InstallerLaunched` never implies installation success.
+- `RetryAsync(installedVersion, ct)`: explicitly recover a pending attempt by reconciling, rediscovering and re-verifying;
+  never install from a persisted path. A changed server target returns `RecoveryRequired`, preserving the earlier handoff
+  until explicitly reconciled/abandoned. Without a pending intent, use `RunAsync` for a new attempt.
+- `AbandonAsync(ct)`: forget tracking (including corrupt state), not OS installation cancellation, APK deletion or rollback.
+
+Always pass the actual installed version. The factory stores versioned minimal intent in
+`<NoBackupFilesDir>/generalupdate/pending-update.json`, atomically replaced after flushing. No URL/path/credentials are persisted.
+Inject `IPendingUpdateStore` through `pendingStore` for other private, persistent storage. Corrupt state fails closed;
+a persistence failure before handoff prevents installation. Pending state blocks another `RunAsync` until explicitly reconciled,
+retried or abandoned. Pass a UI `eventDispatcher`, keep one coordinator per staging directory, and do not mix direct bootstrap calls.
+Coordinator cancellation returns `Canceled`, including gate waits. Factory-created bootstraps are coordinator-owned;
+direct construction is non-owning by default. Await disposal outside callbacks.
+The coordinator also forwards `AddListenerDownloadProgressChanged` and `AddListenerUpdatePrecheck` (configure policy before
+operations; `true` skips, forced updates bypass). The default store holds an exclusive `.lock` lease across cooperating
+instances/processes for each complete workflow. Do not remove the lock file in use. Custom stores without
+`IPendingUpdateStoreLeaseProvider` require a singleton coordinator; separate state files do not protect shared staging paths.
+
+The host invokes reconciliation at startup/installer return and decides when to retry or abandon. This closes the observed
+installed-version loop, not application-health/data-migration recovery, silent installation, automatic relaunch or OS rollback.
+See the repository README for the complete integration example and device-validation requirements.
+
+## Host UI and Recovery
+
+Global download authentication is limited to the configured verification origin. Set
+`HttpDownloadOptions.AllowedDownloadAuthenticationOrigins` only for CDN origins trusted to receive the same credentials;
+`TrustedAuthenticationOrigin` can override the verification origin. Origin checks include scheme, host and port, not paths.
+Authenticated requests require HTTPS unless `AllowInsecureAuthentication` is explicitly enabled for development.
+Internal clients reject redirects; configure final URLs. With an injected `HttpClient`, the host must disable redirects
+and avoid unrestricted credential default headers. Per-package credentials retain precedence at the initial package URL.
+
+The default dispatcher invokes events inline; it does not marshal to the Avalonia UI thread. In the host application,
+implement `IUpdateEventDispatcher.Dispatch` using `Avalonia.Threading.Dispatcher.UIThread.Post(callback)` and pass it
+as `eventDispatcher` to `CreateDefault`. Pre-check is synchronous and is not dispatched; it should read captured policy,
+not controls. Unsubscribe ViewModel event handlers when released, throttle progress rendering, and never synchronously
+wait for another update operation inside a callback. Catch exceptions inside `async void` handlers after awaits.
+
+Use one coordinator per private staging directory and preserve the verified file while the installer may still read it.
+The durable coordinator tracks the intended version; call its reconciliation method on next launch. With the low-level API,
+the host must provide that tracking. Installer launch is not installation confirmation.
+The host owns permission prompting, stale-cache retention, relaunch and failed-release/data-migration recovery.
+
+`Dispose()` cancels without blocking and defers resource release until operations and waiters drain. The concrete
+`AndroidBootstrap` also implements `IAsyncDisposable`; use it outside callbacks when cleanup must be awaited.
+Cancellation while waiting for the operation gate still throws; cancellation during verification returns a canceled result.
+Notification exceptions are isolated, but a pre-check exception fails validation rather than bypassing host policy.
+Configured download retries cover HEAD, GET and interrupted bodies, not metadata discovery or local file errors.
 
 ## API
 

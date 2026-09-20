@@ -5,7 +5,7 @@ using GeneralUpdate.Avalonia.Android.Models;
 
 namespace GeneralUpdate.Avalonia.Android.Services;
 
-public sealed class AndroidBootstrap : IAndroidBootstrap
+public sealed class AndroidBootstrap : IAndroidBootstrap, IAsyncDisposable
 {
     private readonly IVersionComparer _versionComparer;
     private readonly IUpdateDownloader _downloader;
@@ -17,7 +17,12 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
     private readonly UpdateServerOptions? _updateServer;
     private readonly HttpUpdatePackageClient? _packageClient;
     private readonly SemaphoreSlim _operationGate = new(1, 1);
+    private readonly CancellationTokenSource _shutdown = new();
+    private readonly TaskCompletionSource _drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private bool _disposed;
+    private bool _shutdownCanceled;
+    private bool _resourcesReleased;
+    private int _operations;
 
     private readonly object _sync = new();
     private UpdateStateSnapshot _snapshot = new(UpdateState.None, UpdateFailureReason.None, null);
@@ -72,16 +77,16 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
 
     public async Task<UpdateCheckResult> ValidateAsync(string currentVersion, CancellationToken cancellationToken = default)
     {
-        ThrowIfDisposed();
-        await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        using var operation = await EnterOperationAsync(cancellationToken).ConfigureAwait(false);
+        cancellationToken = operation.Token;
         try
         {
-            cancellationToken.ThrowIfCancellationRequested();
             SetState(UpdateState.Checking, UpdateFailureReason.None, "Checking for updates.");
 
             UpdatePackageInfo? packageInfo;
             try
             {
+                ThrowIfCancellationRequested(cancellationToken);
                 if (string.IsNullOrWhiteSpace(currentVersion))
                 {
                     throw new InvalidDataException("The current application version is required to query the update server.");
@@ -105,11 +110,11 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
                             ProductId = _updateServer.ProductId
                         },
                         cancellationToken).ConfigureAwait(false);
-                cancellationToken.ThrowIfCancellationRequested();
+                ThrowIfCancellationRequested(cancellationToken);
             }
             catch (Exception ex) when (IsQueryFailure(ex))
             {
-                var canceled = ex is OperationCanceledException && cancellationToken.IsCancellationRequested;
+                var canceled = ex is OperationCanceledException && IsCancellationRequested(cancellationToken);
                 var failure = new UpdateCheckResult
                 {
                     Success = false,
@@ -176,7 +181,28 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
                     CurrentVersion = currentVersion
                 };
 
-                if (ShouldSkipUpdate(available, packageInfo, currentVersion))
+                bool skip;
+                try
+                {
+                    skip = ShouldSkipUpdate(available, packageInfo, currentVersion);
+                }
+                catch (Exception ex)
+                {
+                    var canceled = ex is OperationCanceledException && IsCancellationRequested(cancellationToken);
+                    var failed = available with
+                    {
+                        Success = false,
+                        UpdateFound = false,
+                        State = canceled ? UpdateState.Canceled : UpdateState.Failed,
+                        FailureReason = canceled ? UpdateFailureReason.Canceled : UpdateFailureReason.Unknown,
+                        Message = canceled ? "Update check canceled." : "Update pre-check callback failed.",
+                        Exception = ex
+                    };
+                    HandleFailure(failed);
+                    return failed;
+                }
+                ThrowIfCancellationRequested(cancellationToken);
+                if (skip)
                 {
                     var skipped = available with
                     {
@@ -208,18 +234,30 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
                 CurrentVersion = currentVersion
             };
         }
-        finally
+        catch (OperationCanceledException ex)
         {
-            _operationGate.Release();
+            var failure = new UpdateCheckResult
+            {
+                Success = false,
+                State = UpdateState.Canceled,
+                FailureReason = UpdateFailureReason.Canceled,
+                Message = "Update check canceled.",
+                CurrentVersion = currentVersion,
+                Exception = ex
+            };
+            HandleFailure(failure);
+            return failure;
         }
     }
 
     public async Task<UpdateOperationResult> DownloadAndVerifyAsync(UpdatePackageInfo packageInfo, CancellationToken cancellationToken = default)
     {
-        ThrowIfDisposed();
-        await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        using var operation = await EnterOperationAsync(cancellationToken).ConfigureAwait(false);
+        cancellationToken = operation.Token;
+        string? filePath = null;
         try
         {
+            ThrowIfCancellationRequested(cancellationToken);
             SetState(UpdateState.Downloading, UpdateFailureReason.None, "Downloading package.");
 
             var downloadResult = await _downloader.DownloadAsync(
@@ -227,6 +265,8 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
                 progress => RaiseDownloadProgress(progress),
                 cancellationToken).ConfigureAwait(false);
 
+            filePath = downloadResult.FilePath;
+            ThrowIfCancellationRequested(cancellationToken);
             if (!downloadResult.Success || string.IsNullOrWhiteSpace(downloadResult.FilePath))
             {
                 HandleFailure(downloadResult);
@@ -238,7 +278,7 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
                 var actualLength = _fileStorage.GetFileLength(downloadResult.FilePath);
                 if (actualLength != packageInfo.FileSize)
                 {
-                    _fileStorage.DeleteFile(downloadResult.FilePath);
+                    TryDeleteFile(downloadResult.FilePath);
                     var sizeFailed = new UpdateOperationResult
                     {
                         Success = false,
@@ -255,15 +295,19 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
 
             SetState(UpdateState.Verifying, UpdateFailureReason.None, "Validating package hash.");
             var hashResult = await _hashValidator.ValidateSha256Async(downloadResult.FilePath, packageInfo.Sha256, cancellationToken).ConfigureAwait(false);
+            ThrowIfCancellationRequested(cancellationToken);
 
             if (!hashResult.Success)
             {
-                _fileStorage.DeleteFile(downloadResult.FilePath);
+                TryDeleteFile(downloadResult.FilePath);
+                var canceled = hashResult.State == UpdateState.Canceled || hashResult.FailureReason == UpdateFailureReason.Canceled;
                 var failed = hashResult with
                 {
                     PackageInfo = packageInfo,
-                    State = UpdateState.Failed,
-                    FailureReason = hashResult.FailureReason == UpdateFailureReason.None ? UpdateFailureReason.HashMismatch : hashResult.FailureReason,
+                    FilePath = downloadResult.FilePath,
+                    State = canceled ? UpdateState.Canceled : UpdateState.Failed,
+                    FailureReason = canceled ? UpdateFailureReason.Canceled
+                        : hashResult.FailureReason == UpdateFailureReason.None ? UpdateFailureReason.HashMismatch : hashResult.FailureReason,
                     Message = hashResult.Message ?? "SHA256 validation failed."
                 };
                 HandleFailure(failed);
@@ -284,19 +328,35 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
             RaiseCompleted(completed);
             return completed;
         }
-        finally
+        catch (Exception ex)
         {
-            _operationGate.Release();
+            TryDeleteFile(filePath);
+            var canceled = ex is OperationCanceledException && IsCancellationRequested(cancellationToken);
+            var failure = new UpdateOperationResult
+            {
+                Success = false,
+                State = canceled ? UpdateState.Canceled : UpdateState.Failed,
+                FailureReason = canceled ? UpdateFailureReason.Canceled
+                    : ex is IOException or UnauthorizedAccessException ? UpdateFailureReason.FileIoError
+                    : ex is HttpRequestException or OperationCanceledException ? UpdateFailureReason.NetworkError
+                    : UpdateFailureReason.Unknown,
+                Message = canceled ? "Download or verification canceled." : "Download or verification failed.",
+                PackageInfo = packageInfo,
+                FilePath = filePath,
+                Exception = ex
+            };
+            HandleFailure(failure);
+            return failure;
         }
     }
 
     public async Task<InstallResult> LaunchInstallerAsync(UpdatePackageInfo packageInfo, string apkFilePath, CancellationToken cancellationToken = default)
     {
-        ThrowIfDisposed();
-        await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        using var operation = await EnterOperationAsync(cancellationToken).ConfigureAwait(false);
+        cancellationToken = operation.Token;
         try
         {
-            cancellationToken.ThrowIfCancellationRequested();
+            ThrowIfCancellationRequested(cancellationToken);
             SetState(UpdateState.Installing, UpdateFailureReason.None, "Launching installer.");
 
             var result = await _apkInstaller.LaunchInstallAsync(packageInfo, apkFilePath, cancellationToken).ConfigureAwait(false);
@@ -313,9 +373,23 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
 
             return result;
         }
-        finally
+        catch (Exception ex)
         {
-            _operationGate.Release();
+            var canceled = ex is OperationCanceledException && IsCancellationRequested(cancellationToken);
+            var failure = new InstallResult
+            {
+                Success = false,
+                State = canceled ? UpdateState.Canceled : UpdateState.Failed,
+                FailureReason = canceled ? UpdateFailureReason.Canceled
+                    : ex is UnauthorizedAccessException ? UpdateFailureReason.InstallPermissionDenied
+                    : ex is IOException ? UpdateFailureReason.FileIoError : UpdateFailureReason.InstallLaunchFailed,
+                Message = canceled ? "Installer launch canceled." : "Failed to launch installer.",
+                PackageInfo = packageInfo,
+                FilePath = apkFilePath,
+                Exception = ex
+            };
+            HandleFailure(failure);
+            return failure;
         }
     }
 
@@ -351,54 +425,230 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
     private void HandleFailure(UpdateOperationResult result)
     {
         SetState(result.State == UpdateState.Canceled ? UpdateState.Canceled : UpdateState.Failed, result.FailureReason, result.Message);
-        _logger.LogError(result.Message ?? "Update failed.", result.Exception);
+        LogError(result.Message ?? "Update failed.", result.Exception);
         RaiseFailed(result);
     }
 
     private void RaiseValidate(UpdatePackageInfo packageInfo, string currentVersion)
     {
         var args = new ValidateEventArgs(packageInfo, currentVersion);
-        _eventDispatcher.Dispatch(() => AddListenerValidate?.Invoke(this, args));
+        Dispatch(AddListenerValidate, args);
     }
 
     private void RaiseDownloadProgress(DownloadProgressInfo progress)
     {
         var args = new DownloadProgressChangedEventArgs(progress);
-        _eventDispatcher.Dispatch(() => AddListenerDownloadProgressChanged?.Invoke(this, args));
+        Dispatch(AddListenerDownloadProgressChanged, args);
     }
 
     private void RaiseCompleted(UpdateOperationResult result)
     {
         var args = new UpdateCompletedEventArgs(result);
-        _eventDispatcher.Dispatch(() => AddListenerUpdateCompleted?.Invoke(this, args));
+        Dispatch(AddListenerUpdateCompleted, args);
     }
 
     private void RaiseFailed(UpdateOperationResult result)
     {
         var args = new UpdateFailedEventArgs(result);
-        _eventDispatcher.Dispatch(() => AddListenerUpdateFailed?.Invoke(this, args));
+        Dispatch(AddListenerUpdateFailed, args);
     }
 
-    public void Dispose()
+    private void Dispatch<T>(EventHandler<T>? handlers, T args) where T : EventArgs
     {
-        if (_disposed)
+        if (handlers is null)
         {
             return;
         }
 
-        _operationGate.Dispose();
-        _packageClient?.Dispose();
-
-        if (_downloader is IDisposable disposableDownloader)
+        try
         {
-            disposableDownloader.Dispose();
+            _eventDispatcher.Dispatch(() =>
+            {
+                foreach (EventHandler<T> handler in handlers.GetInvocationList())
+                {
+                    try
+                    {
+                        handler(this, args);
+                    }
+                    catch (Exception ex)
+                    {
+                        LogError("Update event subscriber failed.", ex);
+                    }
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            LogError("Update event dispatch failed.", ex);
+        }
+    }
+
+    private void LogError(string message, Exception? exception)
+    {
+        try
+        {
+            _logger.LogError(message, exception);
+        }
+        catch
+        {
+            // Diagnostics must not replace the operation's outcome.
+        }
+    }
+
+    private void TryDeleteFile(string? filePath)
+    {
+        if (string.IsNullOrWhiteSpace(filePath))
+        {
+            return;
         }
 
-        _disposed = true;
+        try
+        {
+            _fileStorage.DeleteFile(filePath);
+        }
+        catch (Exception ex)
+        {
+            LogError("Failed to remove an unverified package.", ex);
+        }
+    }
+
+    private bool IsCancellationRequested(CancellationToken cancellationToken) =>
+        cancellationToken.IsCancellationRequested || _shutdown.IsCancellationRequested;
+
+    private void ThrowIfCancellationRequested(CancellationToken cancellationToken)
+    {
+        // CancelAsync marks shutdown immediately, but linked-token callbacks may still be queued.
+        _shutdown.Token.ThrowIfCancellationRequested();
+        cancellationToken.ThrowIfCancellationRequested();
+    }
+
+    private async Task<OperationLease> EnterOperationAsync(CancellationToken cancellationToken)
+    {
+        OperationLease operation;
+        lock (_sync)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            operation = new OperationLease(this, CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _shutdown.Token));
+            _operations++;
+        }
+
+        try
+        {
+            await _operationGate.WaitAsync(operation.Token).ConfigureAwait(false);
+            operation.Acquired = true;
+            ThrowIfCancellationRequested(operation.Token);
+            return operation;
+        }
+        catch
+        {
+            operation.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Requests cancellation without blocking callbacks. Resources are released after all operations
+    /// and gate waiters drain; use <see cref="DisposeAsync"/> to await that release outside callbacks.
+    /// </summary>
+    public void Dispose()
+    {
+        lock (_sync)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+        }
+
+        _ = CancelAndDrainAsync();
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        Dispose();
+        return new ValueTask(_drained.Task);
+    }
+
+    private async Task CancelAndDrainAsync()
+    {
+        try
+        {
+            await _shutdown.CancelAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            LogError("An update shutdown cancellation callback failed.", ex);
+        }
+
+        lock (_sync)
+        {
+            _shutdownCanceled = true;
+        }
+        TryReleaseResources();
+    }
+
+    private void TryReleaseResources()
+    {
+        lock (_sync)
+        {
+            if (!_shutdownCanceled || _operations != 0 || _resourcesReleased)
+            {
+                return;
+            }
+
+            _resourcesReleased = true;
+        }
+
+        try
+        {
+            try
+            {
+                _packageClient?.Dispose();
+            }
+            finally
+            {
+                (_downloader as IDisposable)?.Dispose();
+            }
+        }
+        catch (Exception ex)
+        {
+            LogError("Failed to dispose update resources.", ex);
+        }
+        finally
+        {
+            _operationGate.Dispose();
+            _shutdown.Dispose();
+            _drained.TrySetResult();
+        }
+    }
+
+    private sealed class OperationLease(AndroidBootstrap owner, CancellationTokenSource cancellation) : IDisposable
+    {
+        public CancellationToken Token => cancellation.Token;
+        public bool Acquired { get; set; }
+
+        public void Dispose()
+        {
+            if (Acquired)
+            {
+                owner._operationGate.Release();
+            }
+            cancellation.Dispose();
+            lock (owner._sync)
+            {
+                owner._operations--;
+            }
+            owner.TryReleaseResources();
+        }
     }
 
     private void ThrowIfDisposed()
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        lock (_sync)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+        }
     }
 }

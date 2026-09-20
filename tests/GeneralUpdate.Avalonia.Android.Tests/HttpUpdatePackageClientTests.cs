@@ -172,6 +172,7 @@ public sealed class HttpUpdatePackageClientTests
             httpOptions: new HttpDownloadOptions
             {
                 AuthProvider = new BearerTokenAuthProvider(token),
+                AllowInsecureAuthentication = true,
                 RequestTimeout = TimeSpan.FromSeconds(5)
             });
 
