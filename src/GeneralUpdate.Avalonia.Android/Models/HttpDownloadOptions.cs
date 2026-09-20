@@ -48,7 +48,8 @@ public sealed record HttpDownloadOptions
     public bool UseProxy { get; init; }
 
     /// <summary>
-    /// Maximum number of retry attempts for transient failures.
+    /// Maximum total attempts for transient download failures, shared across the HEAD probe,
+    /// GET request and body transfer; retries restart the download attempt.
     /// Default is 3 (meaning 1 initial attempt + 2 retries).
     /// Set to 1 to disable retry.
     /// </summary>
