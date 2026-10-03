@@ -91,6 +91,9 @@ public static IAndroidBootstrap CreateDefault(
     IInstallationStore? installationStore = null);
 ```
 
+内置提示默认使用英文。调用 `CreateDefault` 前，在 `AndroidUpdateOptions` 中设置
+`Language = UpdateLanguage.Chinese`，即可将内置提示和下载状态设为中文。
+
 ### IAndroidBootstrap (implements IDisposable)
 
 | Method | Description |

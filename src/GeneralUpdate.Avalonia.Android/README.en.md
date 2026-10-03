@@ -77,6 +77,9 @@ Default wiring:
 | `IUpdatePackageSource` | `HttpUpdatePackageClient` |
 | `IInstallationStore` | `JsonFileInstallationStore` |
 
+Built-in messages default to English. Set `Language = UpdateLanguage.Chinese` on `AndroidUpdateOptions`
+before calling `CreateDefault` to return built-in messages and download statuses in Chinese.
+
 ### IAndroidBootstrap Methods
 
 | Method | Returns |

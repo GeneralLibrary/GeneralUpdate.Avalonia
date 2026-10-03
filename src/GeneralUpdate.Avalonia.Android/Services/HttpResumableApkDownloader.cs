@@ -68,7 +68,7 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
                 Success = false,
                 State = UpdateState.Failed,
                 FailureReason = UpdateFailureReason.InvalidMetadata,
-                Message = "Package metadata is missing DownloadUrl or Sha256.",
+                Message = Text("Package metadata is missing DownloadUrl or Sha256."),
                 PackageInfo = packageInfo
             };
         }
@@ -88,7 +88,7 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
                 Success = false,
                 State = canceled ? UpdateState.Canceled : UpdateState.Failed,
                 FailureReason = canceled ? UpdateFailureReason.Canceled : UpdateFailureReason.NetworkError,
-                Message = canceled ? "Download canceled." : "Download timed out.",
+                Message = Text(canceled ? "Download canceled." : "Download timed out."),
                 PackageInfo = packageInfo,
                 Exception = ex
             };
@@ -100,7 +100,7 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
                 Success = false,
                 State = UpdateState.Failed,
                 FailureReason = UpdateFailureReason.NetworkError,
-                Message = "Network error occurred while downloading package.",
+                Message = Text("Network error occurred while downloading package."),
                 PackageInfo = packageInfo,
                 Exception = ex
             };
@@ -112,7 +112,7 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
                 Success = false,
                 State = UpdateState.Failed,
                 FailureReason = UpdateFailureReason.FileIoError,
-                Message = "File I/O error occurred while downloading package.",
+                Message = Text("File I/O error occurred while downloading package."),
                 PackageInfo = packageInfo,
                 Exception = ex
             };
@@ -135,7 +135,7 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
         if (existingLength > 0 && remoteInfo.ContentLength == existingLength)
         {
             var complete = CompleteDownload(packageInfo, tempFilePath, finalFilePath, sidecarPath);
-            progressCallback?.Invoke(CreateProgress(packageInfo, existingLength, existingLength, 0, "Download completed"));
+            progressCallback?.Invoke(CreateProgress(packageInfo, existingLength, existingLength, 0, Text("Download completed")!));
             return complete;
         }
         if (existingLength > 0 && (!remoteInfo.AcceptRanges || existingLength > remoteInfo.ContentLength))
@@ -177,7 +177,7 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
         var downloaded = existingLength;
         var speedMeter = new SmoothedSpeedMeter(Math.Max(3, _options.SpeedSmoothingWindowSeconds));
 
-        progressCallback?.Invoke(CreateProgress(packageInfo, downloaded, totalBytes, speedMeter.GetSpeed(downloaded), existingLength > 0 ? "Resuming" : "Downloading"));
+        progressCallback?.Invoke(CreateProgress(packageInfo, downloaded, totalBytes, speedMeter.GetSpeed(downloaded), Text(existingLength > 0 ? "Resuming" : "Downloading")!));
 
         // The write stream is flushed and closed before the temporary file is renamed:
         // PhysicalFileStorage opens files with FileShare.None, so renaming an open file fails on
@@ -204,12 +204,12 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
                 downloaded += read;
                 var speed = speedMeter.GetSpeed(downloaded);
 
-                progressCallback?.Invoke(CreateProgress(packageInfo, downloaded, totalBytes, speed, "Downloading"));
+                progressCallback?.Invoke(CreateProgress(packageInfo, downloaded, totalBytes, speed, Text("Downloading")!));
             }
         }
 
         var result = CompleteDownload(packageInfo, tempFilePath, finalFilePath, sidecarPath);
-        progressCallback?.Invoke(CreateProgress(packageInfo, downloaded, totalBytes, speedMeter.GetSpeed(downloaded), "Download completed"));
+        progressCallback?.Invoke(CreateProgress(packageInfo, downloaded, totalBytes, speedMeter.GetSpeed(downloaded), Text("Download completed")!));
         return result;
     }
 
@@ -221,7 +221,7 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
         {
             Success = true,
             State = UpdateState.Completed,
-            Message = "Download finished.",
+            Message = Text("Download finished."),
             PackageInfo = packageInfo,
             FilePath = finalPath
         };
@@ -447,6 +447,8 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
         if (options.DownloadBufferSize <= 0)
             throw new ArgumentOutOfRangeException(nameof(options.DownloadBufferSize));
     }
+
+    private string? Text(string? message) => UpdateMessages.Get(_options.Language, message);
 
     public void Dispose()
     {

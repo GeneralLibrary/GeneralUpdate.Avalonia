@@ -16,6 +16,7 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
     private readonly IUpdateLogger _logger;
     private readonly IUpdatePackageSource _packageSource;
     private readonly IInstallationStore _installationStore;
+    private readonly UpdateLanguage _language;
     private readonly SemaphoreSlim _operationGate = new(1, 1);
     private volatile bool _disposed;
     private bool _resourcesDisposed;
@@ -57,6 +58,22 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
         IInstallationStore installationStore,
         IUpdateEventDispatcher? eventDispatcher = null,
         IUpdateLogger? logger = null)
+        : this(versionComparer, downloader, hashValidator, apkInstaller, fileStorage,
+            packageSource, installationStore, eventDispatcher, logger, UpdateLanguage.English)
+    {
+    }
+
+    public AndroidBootstrap(
+        IVersionComparer versionComparer,
+        IUpdateDownloader downloader,
+        IHashValidator hashValidator,
+        IApkInstaller apkInstaller,
+        IFileStorage fileStorage,
+        IUpdatePackageSource packageSource,
+        IInstallationStore installationStore,
+        IUpdateEventDispatcher? eventDispatcher,
+        IUpdateLogger? logger,
+        UpdateLanguage language)
     {
         _versionComparer = versionComparer ?? throw new ArgumentNullException(nameof(versionComparer));
         _downloader = downloader ?? throw new ArgumentNullException(nameof(downloader));
@@ -67,6 +84,7 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
         _logger = logger ?? new NoOpUpdateLogger();
         _packageSource = packageSource ?? throw new ArgumentNullException(nameof(packageSource));
         _installationStore = installationStore ?? throw new ArgumentNullException(nameof(installationStore));
+        _language = language;
     }
 
     public event EventHandler<ValidateEventArgs>? AddListenerValidate;
@@ -108,7 +126,7 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
 
     private async Task<UpdateCheckResult> ValidateCoreAsync(string currentVersion, CancellationToken cancellationToken)
     {
-        SetState(UpdateState.Checking, UpdateFailureReason.None, "Checking for updates.");
+        SetState(UpdateState.Checking, UpdateFailureReason.None, Text("Checking for updates."));
 
         UpdatePackageInfo? packageInfo;
         try
@@ -136,8 +154,8 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
                         ? UpdateFailureReason.NetworkError
                         : UpdateFailureReason.InvalidMetadata,
                 Message = canceled
-                    ? "Update check canceled."
-                    : "Failed to query the update server.",
+                    ? Text("Update check canceled.")
+                    : Text("Failed to query the update server."),
                 CurrentVersion = currentVersion,
                 Exception = ex
             };
@@ -148,7 +166,7 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
 
         if (packageInfo is null)
         {
-            SetState(UpdateState.Completed, UpdateFailureReason.None, "No update available.");
+            SetState(UpdateState.Completed, UpdateFailureReason.None, Text("No update available."));
 
             return new UpdateCheckResult
             {
@@ -156,7 +174,7 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
                 UpdateFound = false,
                 State = UpdateState.Completed,
                 FailureReason = UpdateFailureReason.None,
-                Message = "No update available.",
+                Message = Text("No update available."),
                 CurrentVersion = currentVersion
             };
         }
@@ -169,7 +187,7 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
                 UpdateFound = false,
                 State = UpdateState.Failed,
                 FailureReason = UpdateFailureReason.VersionComparisonFailed,
-                Message = error ?? "Failed to compare versions.",
+                Message = Text(error ?? "Failed to compare versions."),
                 PackageInfo = packageInfo,
                 CurrentVersion = currentVersion
             };
@@ -186,7 +204,7 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
                 UpdateFound = true,
                 State = UpdateState.UpdateAvailable,
                 FailureReason = UpdateFailureReason.None,
-                Message = "Update available.",
+                Message = Text("Update available."),
                 PackageInfo = packageInfo,
                 CurrentVersion = currentVersion
             };
@@ -197,20 +215,20 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
                 {
                     UpdateFound = false,
                     State = UpdateState.Completed,
-                    Message = "Update skipped by pre-check callback."
+                    Message = Text("Update skipped by pre-check callback.")
                 };
 
                 SetState(skipped.State, skipped.FailureReason, skipped.Message);
                 return skipped;
             }
 
-            SetState(UpdateState.UpdateAvailable, UpdateFailureReason.None, "Update available.");
+            SetState(UpdateState.UpdateAvailable, UpdateFailureReason.None, Text("Update available."));
             RaiseValidate(packageInfo, currentVersion);
 
             return available;
         }
 
-        SetState(UpdateState.Completed, UpdateFailureReason.None, "No update available.");
+        SetState(UpdateState.Completed, UpdateFailureReason.None, Text("No update available."));
 
         return new UpdateCheckResult
         {
@@ -218,7 +236,7 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
             UpdateFound = false,
             State = UpdateState.Completed,
             FailureReason = UpdateFailureReason.None,
-            Message = "No update available.",
+            Message = Text("No update available."),
             PackageInfo = packageInfo,
             CurrentVersion = currentVersion
         };
@@ -264,7 +282,7 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            SetState(UpdateState.Downloading, UpdateFailureReason.None, "Downloading package.");
+            SetState(UpdateState.Downloading, UpdateFailureReason.None, Text("Downloading package."));
 
             var downloadResult = await _downloader.DownloadAsync(
                 packageInfo,
@@ -285,7 +303,7 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
                     Success = false,
                     State = UpdateState.Failed,
                     FailureReason = UpdateFailureReason.FileIoError,
-                    Message = "The downloader returned success without a file path.",
+                    Message = Text("The downloader returned success without a file path."),
                     PackageInfo = packageInfo
                 };
                 HandleFailure(invalid);
@@ -303,7 +321,7 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
                         Success = false,
                         State = UpdateState.Failed,
                         FailureReason = UpdateFailureReason.FileIoError,
-                        Message = $"Downloaded file size mismatch. Expected {packageInfo.FileSize}, actual {actualLength}.",
+                        Message = UpdateMessages.FileSizeMismatch(_language, packageInfo.FileSize, actualLength),
                         PackageInfo = packageInfo,
                         FilePath = downloadResult.FilePath
                     };
@@ -312,7 +330,7 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
                 }
             }
 
-            SetState(UpdateState.Verifying, UpdateFailureReason.None, "Validating package hash.");
+            SetState(UpdateState.Verifying, UpdateFailureReason.None, Text("Validating package hash."));
             var hashResult = await _hashValidator.ValidateSha256Async(downloadResult.FilePath, packageInfo.Sha256, cancellationToken).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
 
@@ -325,7 +343,7 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
                     PackageInfo = packageInfo,
                     State = hashResult.FailureReason == UpdateFailureReason.Canceled ? UpdateState.Canceled : UpdateState.Failed,
                     FailureReason = hashResult.FailureReason == UpdateFailureReason.None ? UpdateFailureReason.HashMismatch : hashResult.FailureReason,
-                    Message = hashResult.Message ?? "SHA256 validation failed."
+                    Message = Text(hashResult.Message ?? "SHA256 validation failed.")
                 };
                 HandleFailure(failed);
                 return failed;
@@ -336,7 +354,7 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
                 Success = true,
                 State = UpdateState.ReadyToInstall,
                 FailureReason = UpdateFailureReason.None,
-                Message = "Package downloaded and verified.",
+                Message = Text("Package downloaded and verified."),
                 PackageInfo = packageInfo,
                 FilePath = downloadResult.FilePath
             };
@@ -353,7 +371,7 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
                 State = canceled ? UpdateState.Canceled : UpdateState.Failed,
                 FailureReason = canceled ? UpdateFailureReason.Canceled
                     : ex is HttpRequestException or OperationCanceledException ? UpdateFailureReason.NetworkError : UpdateFailureReason.FileIoError,
-                Message = canceled ? "Package preparation canceled." : "Package preparation failed.",
+                Message = Text(canceled ? "Package preparation canceled." : "Package preparation failed."),
                 PackageInfo = packageInfo,
                 Exception = ex
             };
@@ -377,7 +395,7 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
                     Success = false,
                     State = UpdateState.Failed,
                     FailureReason = UpdateFailureReason.VersionComparisonFailed,
-                    Message = error,
+                    Message = Text(error),
                     PackageInfo = packageInfo,
                     FilePath = apkFilePath
                 };
@@ -402,7 +420,7 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
                     Success = false,
                     State = canceled ? UpdateState.Canceled : UpdateState.Failed,
                     FailureReason = canceled ? UpdateFailureReason.Canceled : UpdateFailureReason.FileIoError,
-                    Message = "Could not persist the installation target. The installer was not launched.",
+                    Message = Text("Could not persist the installation target. The installer was not launched."),
                     PackageInfo = packageInfo,
                     FilePath = apkFilePath,
                     Exception = ex
@@ -410,13 +428,14 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
                 HandleFailure(failure);
                 return failure;
             }
-            SetState(UpdateState.Installing, UpdateFailureReason.None, "Launching installer.");
+            SetState(UpdateState.Installing, UpdateFailureReason.None, Text("Launching installer."));
 
             var result = await _apkInstaller.LaunchInstallAsync(packageInfo, apkFilePath, cancellationToken).ConfigureAwait(false);
 
             if (result.Success)
             {
-                SetState(UpdateState.Installing, UpdateFailureReason.None, result.Message ?? "Installer launched.");
+                result = result with { Message = Text(result.Message ?? "Installer launched.") };
+                SetState(UpdateState.Installing, UpdateFailureReason.None, result.Message);
                 RaiseCompleted(result);
             }
             else
@@ -433,7 +452,7 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
             {
                 State = canceled ? UpdateState.Canceled : UpdateState.Failed,
                 FailureReason = canceled ? UpdateFailureReason.Canceled : UpdateFailureReason.InstallLaunchFailed,
-                Message = canceled ? "Installer launch canceled." : "Installer launch did not complete.",
+                Message = Text(canceled ? "Installer launch canceled." : "Installer launch did not complete."),
                 PackageInfo = packageInfo,
                 FilePath = apkFilePath,
                 Exception = ex
@@ -463,7 +482,7 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
                     Success = false,
                     State = reason == UpdateFailureReason.Canceled ? UpdateState.Canceled : UpdateState.Failed,
                     FailureReason = reason,
-                    Message = message,
+                    Message = Text(message),
                     Exception = exception
                 };
                 HandleFailure(failure);
@@ -472,7 +491,7 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
 
             if (!_versionComparer.TryCompare(currentVersion, currentVersion, out _, out var versionError))
             {
-                return Fail(UpdateFailureReason.VersionComparisonFailed, versionError ?? "Invalid installed version.");
+                return Fail(UpdateFailureReason.VersionComparisonFailed, Text(versionError ?? "Invalid installed version.")!);
             }
 
             InstallationCheckResult result;
@@ -484,13 +503,13 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
                 cancellationToken.ThrowIfCancellationRequested();
                 if (record is null)
                 {
-                    SetState(UpdateState.None, UpdateFailureReason.None, "No installation attempt recorded.");
+                    SetState(UpdateState.None, UpdateFailureReason.None, Text("No installation attempt recorded."));
                     return new InstallationCheckResult
                     {
                         CurrentVersion = currentVersion,
                         Success = true,
                         State = UpdateState.None,
-                        Message = "No installation attempt recorded."
+                        Message = Text("No installation attempt recorded.")
                     };
                 }
 
@@ -501,7 +520,7 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
 
                 if (!_versionComparer.TryCompare(currentVersion, record.TargetVersion, out var comparison, out versionError))
                 {
-                    return Fail(UpdateFailureReason.VersionComparisonFailed, versionError ?? "Cannot compare installation versions.");
+                    return Fail(UpdateFailureReason.VersionComparisonFailed, Text(versionError ?? "Cannot compare installation versions.")!);
                 }
 
                 var installed = comparison <= 0;
@@ -519,8 +538,8 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
                     Success = true,
                     State = installed ? UpdateState.Installed : UpdateState.InstallationPending,
                     Message = installed
-                        ? "The installed version has reached the recorded update target."
-                        : "The recorded update target is not installed yet. Installation may be pending or canceled."
+                        ? Text("The installed version has reached the recorded update target.")
+                        : Text("The recorded update target is not installed yet. Installation may be pending or canceled.")
                 };
             }
             catch (Exception ex) when (IsInstallationStorageFailure(ex))
@@ -528,7 +547,7 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
                 return Fail(
                     ex is OperationCanceledException && cancellationToken.IsCancellationRequested
                         ? UpdateFailureReason.Canceled : UpdateFailureReason.FileIoError,
-                    "Could not reconcile the installation record.", ex);
+                    Text("Could not reconcile the installation record."), ex);
             }
 
             SetState(result.State, result.FailureReason, result.Message);
@@ -558,7 +577,7 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
             {
                 Success = true,
                 State = UpdateState.None,
-                Message = "Installation record cleared. The installed application was not modified."
+                Message = Text("Installation record cleared. The installed application was not modified.")
             };
             SetState(result.State, result.FailureReason, result.Message);
             return result;
@@ -570,7 +589,7 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
             {
                 State = canceled ? UpdateState.Canceled : UpdateState.Failed,
                 FailureReason = canceled ? UpdateFailureReason.Canceled : UpdateFailureReason.FileIoError,
-                Message = "Could not clear the installation record.",
+                Message = Text("Could not clear the installation record."),
                 Exception = ex
             };
             HandleFailure(failure);
@@ -613,6 +632,8 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
             _snapshot = new UpdateStateSnapshot(state, failureReason, message);
         }
     }
+
+    private string? Text(string? message) => UpdateMessages.Get(_language, message);
 
     private void HandleFailure(UpdateOperationResult result)
     {

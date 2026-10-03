@@ -20,6 +20,28 @@ public sealed class DownloadReliabilityTests : IDisposable
     };
     private static HttpDownloadOptions Policy => new() { MaxRetryAttempts = 3, RetryBaseDelay = TimeSpan.Zero };
 
+    [Fact]
+    public async Task Downloader_UsesConfiguredLanguageForMessages()
+    {
+        using var http = new HttpClient(new Handler((_, _) =>
+            throw new InvalidOperationException("Invalid metadata must not send a request.")));
+        using var downloader = new HttpResumableApkDownloader(http, new PhysicalFileStorage(),
+            new AndroidUpdateOptions { DownloadDirectoryPath = _directory, Language = UpdateLanguage.Chinese });
+
+        var result = await downloader.DownloadAsync(Package with { DownloadUrl = string.Empty }, null);
+
+        Assert.Equal("更新包信息缺少 DownloadUrl 或 Sha256。", result.Message);
+    }
+
+    [Fact]
+    public async Task HashValidator_UsesConfiguredLanguageForMessages()
+    {
+        var result = await new Sha256HashValidator(UpdateLanguage.Chinese)
+            .ValidateSha256Async("unused.apk", string.Empty);
+
+        Assert.Equal("预期 SHA256 值为空。", result.Message);
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]

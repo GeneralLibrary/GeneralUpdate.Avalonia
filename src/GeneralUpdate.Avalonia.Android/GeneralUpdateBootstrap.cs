@@ -62,7 +62,7 @@ public static class GeneralUpdateBootstrap
         var usedSource = packageSource ?? new HttpUpdatePackageClient(
             usedClient, requestOptions.AuthProvider, usedComparer,
             updateServer: options.UpdateServer, requestTimeout: requestOptions.RequestTimeout);
-        var validator = new Sha256HashValidator();
+        var validator = new Sha256HashValidator(options.Language);
         var installer = new AndroidApkInstaller(
             usedContextProvider,
             activityProvider ?? new NullAndroidActivityProvider(),
@@ -78,6 +78,7 @@ public static class GeneralUpdateBootstrap
             usedSource,
             usedInstallationStore,
             eventDispatcher,
-            usedLogger);
+            usedLogger,
+            options.Language);
     }
 }

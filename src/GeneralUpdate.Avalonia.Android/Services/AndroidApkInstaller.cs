@@ -36,7 +36,7 @@ public sealed class AndroidApkInstaller : IApkInstaller
                 Success = false,
                 State = UpdateState.Failed,
                 FailureReason = UpdateFailureReason.InvalidMetadata,
-                Message = "FileProvider authority is not configured.",
+                Message = Text("FileProvider authority is not configured."),
                 PackageInfo = packageInfo,
                 FilePath = apkFilePath
             });
@@ -49,7 +49,7 @@ public sealed class AndroidApkInstaller : IApkInstaller
                 Success = false,
                 State = UpdateState.Failed,
                 FailureReason = UpdateFailureReason.FileIoError,
-                Message = "APK file not found.",
+                Message = Text("APK file not found."),
                 PackageInfo = packageInfo,
                 FilePath = apkFilePath
             });
@@ -63,7 +63,7 @@ public sealed class AndroidApkInstaller : IApkInstaller
                 Success = false,
                 State = UpdateState.Failed,
                 FailureReason = UpdateFailureReason.InstallLaunchFailed,
-                Message = "Android context is unavailable.",
+                Message = Text("Android context is unavailable."),
                 PackageInfo = packageInfo,
                 FilePath = apkFilePath
             });
@@ -77,7 +77,7 @@ public sealed class AndroidApkInstaller : IApkInstaller
                 Success = false,
                 State = UpdateState.Failed,
                 FailureReason = UpdateFailureReason.InstallPermissionDenied,
-                Message = "App is not allowed to request package installs.",
+                Message = Text("App is not allowed to request package installs."),
                 PackageInfo = packageInfo,
                 FilePath = apkFilePath
             });
@@ -108,7 +108,7 @@ public sealed class AndroidApkInstaller : IApkInstaller
                 Success = true,
                 State = UpdateState.Installing,
                 FailureReason = UpdateFailureReason.None,
-                Message = "Installer intent launched.",
+                Message = Text("Installer intent launched."),
                 PackageInfo = packageInfo,
                 FilePath = apkFilePath
             });
@@ -121,11 +121,13 @@ public sealed class AndroidApkInstaller : IApkInstaller
                 Success = false,
                 State = UpdateState.Failed,
                 FailureReason = UpdateFailureReason.InstallLaunchFailed,
-                Message = "Failed to launch installer intent.",
+                Message = Text("Failed to launch installer intent."),
                 PackageInfo = packageInfo,
                 FilePath = apkFilePath,
                 Exception = ex
             });
         }
     }
+
+    private string? Text(string? message) => UpdateMessages.Get(_options.Language, message);
 }

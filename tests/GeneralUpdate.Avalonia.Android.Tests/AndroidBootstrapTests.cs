@@ -14,6 +14,19 @@ public sealed class AndroidBootstrapTests
     private const string Endpoint = "https://example.com/Upgrade/Verification";
     private static readonly string Hash = new('a', 64);
 
+    [Theory]
+    [InlineData(UpdateLanguage.English, "Update available.")]
+    [InlineData(UpdateLanguage.Chinese, "发现可用更新。")]
+    public async Task ValidateAsync_UsesConfiguredLanguage(UpdateLanguage language, string expectedMessage)
+    {
+        using var bootstrap = CreateLocalizedBootstrap(language);
+
+        var result = await bootstrap.ValidateAsync("1.0.0");
+
+        Assert.Equal(expectedMessage, result.Message);
+        Assert.Equal(expectedMessage, bootstrap.GetSnapshot().Message);
+    }
+
     [Fact]
     public async Task ValidateAsync_WhenTargetHigher_RaisesValidateAndReturnsUpdateFound()
     {
@@ -244,6 +257,19 @@ public sealed class AndroidBootstrapTests
             logger: new NoOpUpdateLogger(),
             updateServer: new UpdateServerOptions { RequestUrl = Endpoint },
             httpClient: httpClient ?? CreateHttp("{\"code\":200,\"body\":[]}"));
+    }
+
+    private static AndroidBootstrap CreateLocalizedBootstrap(UpdateLanguage language) =>
+        new(new SystemVersionComparer(), new SuccessDownloader(), new SuccessHashValidator(),
+            new SuccessInstaller(), new TestFileStorage(),
+            new StaticPackageSource(CreatePackageInfo(version: "1.2.0")),
+            new JsonFileInstallationStore(Path.Combine(Path.GetTempPath(), $"gu-{Guid.NewGuid():N}.json")),
+            new ImmediateEventDispatcher(), new NoOpUpdateLogger(), language);
+
+    private sealed class StaticPackageSource(UpdatePackageInfo package) : IUpdatePackageSource
+    {
+        public Task<UpdatePackageInfo?> GetLatestAsync(string currentVersion, CancellationToken cancellationToken = default) =>
+            Task.FromResult<UpdatePackageInfo?>(package);
     }
 
     /// <summary>
