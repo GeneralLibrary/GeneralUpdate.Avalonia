@@ -93,6 +93,8 @@ public static IAndroidBootstrap CreateDefault(
 
 内置提示默认使用英文。调用 `CreateDefault` 前，在 `AndroidUpdateOptions` 中设置
 `Language = UpdateLanguage.Chinese`，即可将内置提示和下载状态设为中文。
+更新包下载默认要求 HTTPS。仅在明确接受明文传输风险时设置
+`AllowInsecureHttpDownloads = true`；全局 `HttpDownloadOptions.AuthProvider` 仅会用于与 HTTPS 验证接口同源的下载。
 
 ### IAndroidBootstrap (implements IDisposable)
 

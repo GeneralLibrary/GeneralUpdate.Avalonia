@@ -150,7 +150,7 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
                 State = canceled ? UpdateState.Canceled : UpdateState.Failed,
                 FailureReason = canceled
                     ? UpdateFailureReason.Canceled
-                    : ex is HttpRequestException or OperationCanceledException or IOException
+                    : ex is HttpRequestException or OperationCanceledException or IOException or TimeoutException
                         ? UpdateFailureReason.NetworkError
                         : UpdateFailureReason.InvalidMetadata,
                 Message = canceled
@@ -610,7 +610,7 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
     /// </summary>
     private static bool IsQueryFailure(Exception ex) =>
         ex is HttpRequestException or OperationCanceledException or JsonException or
-            InvalidDataException or IOException or ArgumentException;
+            InvalidDataException or IOException or ArgumentException or TimeoutException;
 
     private bool ShouldSkipUpdate(UpdateCheckResult result, UpdatePackageInfo packageInfo, string currentVersion)
     {

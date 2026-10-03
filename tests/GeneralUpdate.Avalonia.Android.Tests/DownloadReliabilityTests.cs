@@ -34,6 +34,89 @@ public sealed class DownloadReliabilityTests : IDisposable
     }
 
     [Fact]
+    public async Task Downloader_RejectsPlainHttpUnlessExplicitlyAllowed()
+    {
+        var requests = 0;
+        using var http = new HttpClient(new Handler((_, _) =>
+        {
+            requests++;
+            return Task.FromResult(Response(false));
+        }));
+        using var downloader = Create(http);
+
+        var result = await downloader.DownloadAsync(Package with { DownloadUrl = "http://example.test/update.apk" }, null);
+
+        Assert.False(result.Success);
+        Assert.Equal(UpdateFailureReason.InvalidMetadata, result.FailureReason);
+        Assert.Equal("Package download URL must use HTTPS.", result.Message);
+        Assert.Equal(0, requests);
+    }
+
+    [Fact]
+    public async Task Downloader_AllowsPlainHttpOnlyWhenExplicitlyConfigured()
+    {
+        var requests = 0;
+        using var http = new HttpClient(new Handler((request, _) =>
+        {
+            requests++;
+            Assert.Null(request.Headers.Authorization);
+            return Task.FromResult(Response(request.Method == HttpMethod.Head));
+        }));
+        using var downloader = Create(http, Policy with { AuthProvider = new BearerTokenAuthProvider("global-secret") },
+            new AndroidUpdateOptions { AllowInsecureHttpDownloads = true });
+
+        var result = await downloader.DownloadAsync(Package with { DownloadUrl = "http://example.test/update.apk" }, null);
+
+        Assert.True(result.Success, result.Exception?.ToString());
+        Assert.Equal(2, requests);
+    }
+
+    [Fact]
+    public async Task Downloader_DoesNotSendGlobalAuthToDifferentHttpsOrigin()
+    {
+        var requests = 0;
+        using var http = new HttpClient(new Handler((request, _) =>
+        {
+            requests++;
+            Assert.Null(request.Headers.Authorization);
+            return Task.FromResult(Response(request.Method == HttpMethod.Head));
+        }));
+        using var downloader = Create(http, Policy with { AuthProvider = new BearerTokenAuthProvider("global-secret") },
+            new AndroidUpdateOptions
+            {
+                UpdateServer = new UpdateServerOptions { RequestUrl = "https://verification.example/check" }
+            });
+
+        var result = await downloader.DownloadAsync(Package, null);
+
+        Assert.True(result.Success, result.Exception?.ToString());
+        Assert.Equal(2, requests);
+    }
+
+    [Fact]
+    public async Task Downloader_AppliesGlobalAuthToSameHttpsOrigin()
+    {
+        var requests = 0;
+        using var http = new HttpClient(new Handler((request, _) =>
+        {
+            requests++;
+            Assert.Equal("Bearer", request.Headers.Authorization!.Scheme);
+            Assert.Equal("same-origin-token", request.Headers.Authorization.Parameter);
+            return Task.FromResult(Response(request.Method == HttpMethod.Head));
+        }));
+        using var downloader = Create(http, Policy with { AuthProvider = new BearerTokenAuthProvider("same-origin-token") },
+            new AndroidUpdateOptions
+            {
+                UpdateServer = new UpdateServerOptions { RequestUrl = "https://example.test/check" }
+            });
+
+        var result = await downloader.DownloadAsync(Package, null);
+
+        Assert.True(result.Success, result.Exception?.ToString());
+        Assert.Equal(2, requests);
+    }
+
+    [Fact]
     public async Task HashValidator_UsesConfiguredLanguageForMessages()
     {
         var result = await new Sha256HashValidator(UpdateLanguage.Chinese)
@@ -177,7 +260,10 @@ public sealed class DownloadReliabilityTests : IDisposable
         using var source = HttpUpdatePackageClient.Create(http, policy, new SystemVersionComparer(),
             new UpdateServerOptions { RequestUrl = "https://example.test/check", UseJsonEndpoint = true });
         Assert.NotNull(await source.GetLatestAsync("1.0.0"));
-        using var downloader = Create(http, policy);
+        using var downloader = Create(http, policy, new AndroidUpdateOptions
+        {
+            UpdateServer = new UpdateServerOptions { RequestUrl = "https://example.test/check", UseJsonEndpoint = true }
+        });
         Assert.True((await downloader.DownloadAsync(Package, null)).Success);
         Assert.Equal(3, requests);
         Assert.Equal(TimeSpan.FromSeconds(77), http.Timeout);
@@ -268,8 +354,8 @@ public sealed class DownloadReliabilityTests : IDisposable
         await Assert.ThrowsAsync<ObjectDisposedException>(() => http.GetAsync("https://example.test/"));
     }
 
-    private HttpResumableApkDownloader Create(HttpClient http, HttpDownloadOptions? policy = null) =>
-        new(http, new PhysicalFileStorage(), new AndroidUpdateOptions { DownloadDirectoryPath = _directory },
+    private HttpResumableApkDownloader Create(HttpClient http, HttpDownloadOptions? policy = null, AndroidUpdateOptions? options = null) =>
+        new(http, new PhysicalFileStorage(), (options ?? new AndroidUpdateOptions()) with { DownloadDirectoryPath = _directory },
             httpOptions: policy ?? Policy);
 
     private HttpResponseMessage Response(bool head)

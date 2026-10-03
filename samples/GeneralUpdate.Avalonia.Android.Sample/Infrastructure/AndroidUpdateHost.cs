@@ -15,7 +15,8 @@ internal sealed class AndroidUpdateHost(IUpdateLogger logger) : IUpdateHost
         {
             FileProviderAuthority = $"{Context.PackageName}.generalupdate.fileprovider",
             UpdateServer = options,
-            Language = language
+            Language = language,
+            AllowInsecureHttpDownloads = options?.RequestUrl.StartsWith("http://127.0.0.1:", StringComparison.OrdinalIgnoreCase) == true
         }, activityProvider: new CurrentActivityProvider(),
             eventDispatcher: new AvaloniaUpdateEventDispatcher(), logger: logger,
             httpOptions: new HttpDownloadOptions { DownloadTimeout = TimeSpan.FromMinutes(15) });

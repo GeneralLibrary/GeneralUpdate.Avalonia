@@ -18,6 +18,11 @@ public sealed record AndroidUpdateOptions
     public string TemporaryFileExtension { get; init; } = ".part";
     public string SidecarExtension { get; init; } = ".json";
     public string FileProviderAuthority { get; init; } = string.Empty;
+    /// <summary>
+    /// Allows package downloads over plaintext HTTP. Disabled by default; enable only for trusted development
+    /// environments. Global authentication is never sent over HTTP even when this is enabled.
+    /// </summary>
+    public bool AllowInsecureHttpDownloads { get; init; }
     /// <summary>Language used for built-in user-facing update messages. Defaults to English.</summary>
     public UpdateLanguage Language { get; init; } = UpdateLanguage.English;
     public int DownloadBufferSize { get; init; } = 64 * 1024;
@@ -71,6 +76,7 @@ internal static class UpdateMessages
             "Installation record cleared. The installed application was not modified." => "安装记录已清除，未修改已安装的应用。",
             "Could not clear the installation record." => "无法清除安装记录。",
             "Package metadata is missing DownloadUrl or Sha256." => "更新包信息缺少 DownloadUrl 或 Sha256。",
+            "Package download URL must use HTTPS." => "更新包下载地址必须使用 HTTPS。",
             "Download canceled." => "下载已取消。",
             "Download timed out." => "下载超时。",
             "Network error occurred while downloading package." => "下载更新包时发生网络错误。",

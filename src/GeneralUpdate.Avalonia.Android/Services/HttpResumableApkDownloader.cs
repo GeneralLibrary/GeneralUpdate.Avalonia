@@ -20,6 +20,7 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
 
     private readonly HttpDownloadOptions? _httpOptions;
     private readonly IHttpAuthProvider? _globalAuthProvider;
+    private readonly Uri? _verificationUri;
     private readonly bool _ownsClient;
 
     /// <summary>
@@ -37,6 +38,7 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
         _logger = logger ?? new NoOpUpdateLogger();
         _httpOptions = httpOptions;
         _globalAuthProvider = httpOptions?.AuthProvider;
+        _verificationUri = TryGetVerificationUri(options.UpdateServer?.RequestUrl);
         _ownsClient = ownsClient;
     }
 
@@ -54,6 +56,7 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
 
         _httpClient = UpdateHttpClientFactory.Create(null, httpOptions, out _);
         _globalAuthProvider = httpOptions.AuthProvider;
+        _verificationUri = TryGetVerificationUri(options.UpdateServer?.RequestUrl);
         _ownsClient = true;
     }
 
@@ -69,6 +72,18 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
                 State = UpdateState.Failed,
                 FailureReason = UpdateFailureReason.InvalidMetadata,
                 Message = Text("Package metadata is missing DownloadUrl or Sha256."),
+                PackageInfo = packageInfo
+            };
+        }
+
+        if (uri.Scheme != Uri.UriSchemeHttps && !_options.AllowInsecureHttpDownloads)
+        {
+            return new DownloadResult
+            {
+                Success = false,
+                State = UpdateState.Failed,
+                FailureReason = UpdateFailureReason.InvalidMetadata,
+                Message = Text("Package download URL must use HTTPS."),
                 PackageInfo = packageInfo
             };
         }
@@ -123,6 +138,7 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
         Action<DownloadProgressInfo>? progressCallback, CancellationToken cancellationToken)
     {
         _fileStorage.EnsureDirectory(_options.DownloadDirectoryPath);
+        var downloadUri = new Uri(packageInfo.DownloadUrl, UriKind.Absolute);
         var finalName = ResolveFileName(packageInfo);
         var finalFilePath = Path.Combine(_options.DownloadDirectoryPath, finalName);
         var tempFilePath = finalFilePath + _options.TemporaryFileExtension;
@@ -151,7 +167,7 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
             request.Headers.Range = new RangeHeaderValue(existingLength, null);
         }
 
-        await ApplyAuthAsync(request, packageInfo, cancellationToken).ConfigureAwait(false);
+        await ApplyAuthAsync(request, packageInfo, downloadUri, cancellationToken).ConfigureAwait(false);
 
         using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
         if (existingLength > 0 && response.StatusCode == HttpStatusCode.OK)
@@ -232,7 +248,7 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(_httpOptions?.RequestTimeout ?? Timeout.InfiniteTimeSpan);
         using var headRequest = new HttpRequestMessage(HttpMethod.Head, packageInfo.DownloadUrl);
-        await ApplyAuthAsync(headRequest, packageInfo, timeout.Token).ConfigureAwait(false);
+        await ApplyAuthAsync(headRequest, packageInfo, headRequest.RequestUri!, timeout.Token).ConfigureAwait(false);
         using var headResponse = await _httpClient.SendAsync(headRequest, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
         if (headResponse.StatusCode is HttpStatusCode.MethodNotAllowed or HttpStatusCode.NotImplemented)
         {
@@ -248,7 +264,8 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
             acceptRanges);
     }
 
-    private async Task ApplyAuthAsync(HttpRequestMessage request, UpdatePackageInfo packageInfo, CancellationToken cancellationToken)
+    private async Task ApplyAuthAsync(
+        HttpRequestMessage request, UpdatePackageInfo packageInfo, Uri downloadUri, CancellationToken cancellationToken)
     {
         IHttpAuthProvider? provider = null;
 
@@ -264,7 +281,10 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
         }
 
         // Fall back to global auth when per-package is not set or not configured
-        if ((provider is null || provider is NoOpAuthProvider) && _globalAuthProvider != null)
+        if ((provider is null || provider is NoOpAuthProvider) &&
+            _globalAuthProvider != null &&
+            downloadUri.Scheme == Uri.UriSchemeHttps &&
+            IsSameOrigin(downloadUri, _verificationUri))
         {
             if (packageInfo.AuthScheme.HasValue)
             {
@@ -449,6 +469,19 @@ public sealed class HttpResumableApkDownloader : IUpdateDownloader, IDisposable
     }
 
     private string? Text(string? message) => UpdateMessages.Get(_options.Language, message);
+
+    private static Uri? TryGetVerificationUri(string? value) =>
+        Uri.TryCreate(value, UriKind.Absolute, out var uri) &&
+        (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps)
+            ? uri
+            : null;
+
+    private static bool IsSameOrigin(Uri downloadUri, Uri? verificationUri) =>
+        verificationUri is not null &&
+        verificationUri.Scheme == Uri.UriSchemeHttps &&
+        downloadUri.Scheme == Uri.UriSchemeHttps &&
+        string.Equals(downloadUri.Host, verificationUri.Host, StringComparison.OrdinalIgnoreCase) &&
+        downloadUri.Port == verificationUri.Port;
 
     public void Dispose()
     {

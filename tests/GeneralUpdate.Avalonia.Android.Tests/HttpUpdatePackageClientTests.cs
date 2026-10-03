@@ -3,6 +3,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using GeneralUpdate.Avalonia.Android.Abstractions;
+using GeneralUpdate.Avalonia.Android.Events;
 using GeneralUpdate.Avalonia.Android.Enums;
 using GeneralUpdate.Avalonia.Android.Models;
 using GeneralUpdate.Avalonia.Android.Services;
@@ -151,6 +152,28 @@ public sealed class HttpUpdatePackageClientTests
         Assert.False(result.Success);
         Assert.Equal(UpdateState.Failed, result.State);
         Assert.Equal(UpdateFailureReason.NetworkError, result.FailureReason);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PackageSourceTimeout_IsReportedAsNetworkFailure(bool prepare)
+    {
+        using var bootstrap = TestBootstrap.Create(source: new DelegatePackageSource((_, _) =>
+            throw new TimeoutException("Custom package source timed out.")));
+        UpdateFailedEventArgs? failed = null;
+        bootstrap.AddListenerUpdateFailed += (_, args) => failed = args;
+
+        UpdateOperationResult result = prepare
+            ? await bootstrap.PrepareUpdateAsync("1.0.0")
+            : await bootstrap.ValidateAsync("1.0.0");
+
+        Assert.False(result.Success);
+        Assert.Equal(UpdateFailureReason.NetworkError, result.FailureReason);
+        Assert.Equal(UpdateState.Failed, result.State);
+        Assert.Equal(UpdateState.Failed, bootstrap.GetSnapshot().State);
+        Assert.NotNull(failed);
+        Assert.Equal(UpdateFailureReason.NetworkError, failed!.Result.FailureReason);
     }
 
     [Fact]

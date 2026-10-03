@@ -63,8 +63,9 @@ public sealed record HttpDownloadOptions
     public TimeSpan RetryBaseDelay { get; init; } = TimeSpan.FromSeconds(1);
 
     /// <summary>
-    /// Global authentication provider applied to update server verification and download requests.
-    /// Per-package authentication on <see cref="UpdatePackageInfo"/> takes precedence for downloads.
+    /// Global authentication provider applied to update server verification and downloads on the same HTTPS origin.
+    /// It is never sent to a different download origin or to an HTTP download. Per-package authentication
+    /// on <see cref="UpdatePackageInfo"/> takes precedence for downloads.
     /// </summary>
     public IHttpAuthProvider? AuthProvider { get; init; }
 

@@ -79,6 +79,9 @@ Default wiring:
 
 Built-in messages default to English. Set `Language = UpdateLanguage.Chinese` on `AndroidUpdateOptions`
 before calling `CreateDefault` to return built-in messages and download statuses in Chinese.
+Package downloads require HTTPS by default. Set `AllowInsecureHttpDownloads = true` only when plaintext
+transport is explicitly acceptable. The global `HttpDownloadOptions.AuthProvider` is applied to downloads
+only when their HTTPS origin matches the configured verification endpoint.
 
 ### IAndroidBootstrap Methods
 
