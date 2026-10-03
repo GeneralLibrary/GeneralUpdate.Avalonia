@@ -395,7 +395,7 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
                     Success = false,
                     State = UpdateState.Failed,
                     FailureReason = UpdateFailureReason.VersionComparisonFailed,
-                    Message = Text(error),
+                    Message = error is null ? null : Text(error),
                     PackageInfo = packageInfo,
                     FilePath = apkFilePath
                 };
@@ -633,7 +633,7 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
         }
     }
 
-    private string? Text(string? message) => UpdateMessages.Get(_language, message);
+    private string Text(string message) => UpdateMessages.Get(_language, message)!;
 
     private void HandleFailure(UpdateOperationResult result)
     {
