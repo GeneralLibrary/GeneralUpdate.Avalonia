@@ -6,6 +6,12 @@ namespace GeneralUpdate.Avalonia.Android.Services;
 
 public sealed class Sha256HashValidator : IHashValidator
 {
+    private readonly UpdateLanguage _language;
+
+    public Sha256HashValidator() : this(UpdateLanguage.English) { }
+
+    public Sha256HashValidator(UpdateLanguage language) => _language = language;
+
     public async Task<HashValidationResult> ValidateSha256Async(string filePath, string expectedSha256, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(expectedSha256))
@@ -15,7 +21,7 @@ public sealed class Sha256HashValidator : IHashValidator
                 Success = false,
                 State = UpdateState.Failed,
                 FailureReason = UpdateFailureReason.InvalidMetadata,
-                Message = "Expected SHA256 is empty.",
+                Message = Text("Expected SHA256 is empty."),
                 FilePath = filePath,
                 ExpectedSha256 = expectedSha256
             };
@@ -28,7 +34,7 @@ public sealed class Sha256HashValidator : IHashValidator
                 Success = false,
                 State = UpdateState.Failed,
                 FailureReason = UpdateFailureReason.FileIoError,
-                Message = "Downloaded file not found.",
+                Message = Text("Downloaded file not found."),
                 FilePath = filePath,
                 ExpectedSha256 = expectedSha256
             };
@@ -48,7 +54,7 @@ public sealed class Sha256HashValidator : IHashValidator
                 Success = success,
                 State = success ? UpdateState.ReadyToInstall : UpdateState.Failed,
                 FailureReason = success ? UpdateFailureReason.None : UpdateFailureReason.HashMismatch,
-                Message = success ? "SHA256 validation succeeded." : "SHA256 validation failed.",
+                Message = Text(success ? "SHA256 validation succeeded." : "SHA256 validation failed."),
                 FilePath = filePath,
                 ActualSha256 = actual,
                 ExpectedSha256 = expected
@@ -65,7 +71,7 @@ public sealed class Sha256HashValidator : IHashValidator
                 Success = false,
                 State = UpdateState.Failed,
                 FailureReason = UpdateFailureReason.FileIoError,
-                Message = "Failed to validate SHA256.",
+                Message = Text("Failed to validate SHA256."),
                 FilePath = filePath,
                 ExpectedSha256 = Normalize(expectedSha256),
                 Exception = ex
@@ -74,4 +80,6 @@ public sealed class Sha256HashValidator : IHashValidator
     }
 
     private static string Normalize(string value) => value.Replace("-", string.Empty, StringComparison.Ordinal).Trim();
+
+    private string? Text(string? message) => UpdateMessages.Get(_language, message);
 }

@@ -11,6 +11,8 @@
     <AndroidPackageFormat>apk</AndroidPackageFormat>
     <EmbedAssembliesIntoApk>true</EmbedAssembliesIntoApk>
     <SupportedOSPlatformVersion>26</SupportedOSPlatformVersion>
+    <!-- Trimmed multi-ABI Android builds must not infer the desktop host's publish RID. -->
+    <UseDefaultPublishRuntimeIdentifier>false</UseDefaultPublishRuntimeIdentifier>
   </PropertyGroup>
 
   <ItemGroup>

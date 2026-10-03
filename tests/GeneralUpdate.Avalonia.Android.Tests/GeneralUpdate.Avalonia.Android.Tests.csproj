@@ -7,6 +7,14 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="../../samples/GeneralUpdate.Avalonia.Android.Sample/Infrastructure/IUpdateHost.cs" Link="Sample/IUpdateHost.cs" />
+    <Compile Include="../../samples/GeneralUpdate.Avalonia.Android.Sample/Infrastructure/UpdateViewText.cs" Link="Sample/UpdateViewText.cs" />
+    <Compile Include="../../samples/GeneralUpdate.Avalonia.Android.Sample/ViewModels/UpdateViewModel.cs" Link="Sample/UpdateViewModel.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Abstractions/IUpdatePackageSource.cs" Link="Source/Abstractions/IUpdatePackageSource.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Abstractions/IInstallationStore.cs" Link="Source/Abstractions/IInstallationStore.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Models/UpdatePreparationResult.cs" Link="Source/Models/UpdatePreparationResult.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Services/JsonFileInstallationStore.cs" Link="Source/Services/JsonFileInstallationStore.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Services/UpdateHttpClientFactory.cs" Link="Source/Services/UpdateHttpClientFactory.cs" />
     <PackageReference Include="coverlet.collector" Version="6.0.2" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
     <PackageReference Include="xunit" Version="2.9.2" />
@@ -14,6 +22,9 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Models/InstallationRecord.cs" Link="Source/Models/InstallationRecord.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Models/InstallationCheckResult.cs" Link="Source/Models/InstallationCheckResult.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Events/InstallationConfirmedEventArgs.cs" Link="Source/Events/InstallationConfirmedEventArgs.cs" />
     <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Abstractions/IApkInstaller.cs" Link="Source/Abstractions/IApkInstaller.cs" />
     <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Abstractions/IAndroidBootstrap.cs" Link="Source/Abstractions/IAndroidBootstrap.cs" />
     <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Abstractions/IFileStorage.cs" Link="Source/Abstractions/IFileStorage.cs" />
@@ -26,6 +37,7 @@
     <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Abstractions/IVersionComparer.cs" Link="Source/Abstractions/IVersionComparer.cs" />
     <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Enums/AuthScheme.cs" Link="Source/Enums/AuthScheme.cs" />
     <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Enums/UpdateFailureReason.cs" Link="Source/Enums/UpdateFailureReason.cs" />
+    <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Enums/UpdateLanguage.cs" Link="Source/Enums/UpdateLanguage.cs" />
     <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Enums/UpdateState.cs" Link="Source/Enums/UpdateState.cs" />
     <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Events/DownloadProgressChangedEventArgs.cs" Link="Source/Events/DownloadProgressChangedEventArgs.cs" />
     <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Events/UpdateCompletedEventArgs.cs" Link="Source/Events/UpdateCompletedEventArgs.cs" />

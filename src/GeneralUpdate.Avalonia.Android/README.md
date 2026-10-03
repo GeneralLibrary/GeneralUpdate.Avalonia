@@ -21,6 +21,9 @@ UI-free Android auto-update core library for Avalonia 12+ apps (`net10.0-android
 
 ## Quick Start
 
+Read `currentVersion` from Android PackageManager and configure `androidPlatformId` for your server.
+The [full integration example](../../README-EN.md#basic-usage) also reconciles the previous installation at startup.
+
 ```bash
 dotnet add package GeneralUpdate.Avalonia.Android
 ```
@@ -45,18 +48,18 @@ var options = new AndroidUpdateOptions
     }
 };
 
-using IAndroidBootstrap bootstrap = GeneralUpdateBootstrap.CreateDefault(options);
+using var bootstrap = GeneralUpdateBootstrap.CreateDefault(options);
 
-var check = await bootstrap.ValidateAsync("2.2.1", ct);
-if (check.Success && check.UpdateFound && check.PackageInfo is { } packageInfo)
+bootstrap.AddListenerUpdateFailed += (_, args) => Console.Error.WriteLine(args.Result.Message);
+var prepared = await bootstrap.PrepareUpdateAsync(currentVersion, CancellationToken.None);
+if (prepared.IsReadyToInstall && prepared.PackageInfo is { } package && prepared.FilePath is { } path)
 {
-    var result = await bootstrap.DownloadAndVerifyAsync(packageInfo, ct);
-    if (result.Success && result.FilePath is not null)
-    {
-        await bootstrap.LaunchInstallerAsync(packageInfo, result.FilePath, ct);
-    }
+    await bootstrap.LaunchInstallerAsync(package, path, CancellationToken.None);
 }
 ```
+
+Preparation holds one lock across validation, pre-check, download and hash verification, without opening any UI.
+No update or a skipped update succeeds with `IsReadyToInstall = false`. Separate stage APIs remain available.
 
 ## API
 
@@ -72,6 +75,8 @@ if (check.Success && check.UpdateFound && check.PackageInfo is { } packageInfo)
 //   IHashValidator           → Sha256HashValidator
 //   IApkInstaller            → AndroidApkInstaller
 //   IVersionComparer         → SystemVersionComparer
+//   IUpdatePackageSource     → HttpUpdatePackageClient
+//   IInstallationStore       → JsonFileInstallationStore
 
 public static IAndroidBootstrap CreateDefault(
     AndroidUpdateOptions options,
@@ -81,16 +86,26 @@ public static IAndroidBootstrap CreateDefault(
     IVersionComparer? versionComparer = null,
     IUpdateEventDispatcher? eventDispatcher = null,
     IUpdateLogger? logger = null,
-    HttpDownloadOptions? httpOptions = null);
+    HttpDownloadOptions? httpOptions = null,
+    IUpdatePackageSource? packageSource = null,
+    IInstallationStore? installationStore = null);
 ```
+
+内置提示默认使用英文。调用 `CreateDefault` 前，在 `AndroidUpdateOptions` 中设置
+`Language = UpdateLanguage.Chinese`，即可将内置提示和下载状态设为中文。
+更新包下载默认要求 HTTPS。仅在明确接受明文传输风险时设置
+`AllowInsecureHttpDownloads = true`；全局 `HttpDownloadOptions.AuthProvider` 仅会用于与 HTTPS 验证接口同源的下载。
 
 ### IAndroidBootstrap (implements IDisposable)
 
 | Method | Description |
 |---|---|
+| `PrepareUpdateAsync(currentVersion, ct)` | Query, download and verify under one lock; return `UpdatePreparationResult` with `IsReadyToInstall` |
 | `ValidateAsync(currentVersion, ct)` | Query `AndroidUpdateOptions.UpdateServer` for the newest package, compare versions, fire `AddListenerValidate` or `AddListenerUpdateFailed`, return `UpdateCheckResult` (with the discovered `PackageInfo`) |
 | `DownloadAndVerifyAsync(packageInfo, ct)` | Resume-download APK, SHA-256 verify, fire progress/completed/failed events, return `UpdateOperationResult` |
 | `LaunchInstallerAsync(packageInfo, apkFilePath, ct)` | Launch Android `ACTION_VIEW` intent via FileProvider, return `InstallResult` |
+| `CheckInstallationAsync(currentVersion, ct)` | Reconcile the durable target with the actual installed version, return `InstallationCheckResult` |
+| `ResetInstallationAsync(ct)` | Explicitly clear the installation record, without modifying the installed app |
 | `GetSnapshot()` | Thread-safe snapshot of current `(State, FailureReason, Message)` |
 | `AddListenerUpdatePrecheck(func)` | Register a pre-check callback (see below), return the bootstrap for chaining |
 
@@ -99,6 +114,7 @@ public static IAndroidBootstrap CreateDefault(
 | `AddListenerValidate` | `ValidateEventArgs` — `PackageInfo`, `CurrentVersion` |
 | `AddListenerDownloadProgressChanged` | `DownloadProgressChangedEventArgs` — speed, bytes, percentage, status |
 | `AddListenerUpdateCompleted` | `UpdateCompletedEventArgs` — `Result` (`UpdateOperationResult`) |
+| `AddListenerInstallationConfirmed` | `InstallationConfirmedEventArgs` — first durable confirmation of the installed target |
 | `AddListenerUpdateFailed` | `UpdateFailedEventArgs` — `Result`, `FailureReason` |
 
 ### Server-Driven Validation
@@ -111,9 +127,39 @@ By default it POSTs the GeneralUpdate verification protocol (`version/appKey/app
 `{"code":200,"body":[...]}`); set `UpdateServer.UseJsonEndpoint = true` to GET a single `UpdatePackageInfo` JSON document
 instead. HTTP 204 or an empty result means "no update"; transport, protocol and metadata failures are reported through
 `UpdateCheckResult.Success`/`FailureReason` and `AddListenerUpdateFailed`, and never invoke the pre-check callback. Without a
-configured `UpdateServer` the call fails with `UpdateFailureReason.InvalidMetadata`. Validation requests reuse the
+configured `UpdateServer` or custom package source the call fails with `UpdateFailureReason.InvalidMetadata`. Validation requests reuse the
 `httpOptions` passed to `CreateDefault` (`RequestTimeout`, proxy, TLS, `AuthProvider`). See the repository README for the
 full contract and the JSON payload example.
+
+### Installation Confirmation
+
+`CreateDefault` records the target before installer handoff in `<FilesDir>/update/installation.json`
+(override `InstallationStateFilePath` to change it). A storage failure prevents handoff. Use one bootstrap per journal.
+On startup or installer return, call `CheckInstallationAsync` with the actual version read from Android PackageManager.
+It works offline: `State == None` means no attempt, `HasPendingInstallation` means the target is not yet installed,
+and `IsInstalled` means the version reached or exceeded the target. Failures are reported, not treated as missing records.
+The durable result remains available across restarts; `AddListenerInstallationConfirmed` fires only on the first confirmation.
+The event is best-effort, so restore UI from the returned result rather than relying on event redelivery.
+
+`AddListenerUpdateCompleted` retains its legacy phase semantics (`ReadyToInstall` / `Installing`), not installation success.
+The compatibility constructor uses `LocalApplicationData/update/installation.json` when `installationStateFilePath` is omitted.
+The dependency-injection constructor requires `IInstallationStore`; tracking is never implicitly disabled.
+To recover corrupt records, explicitly call `ResetInstallationAsync` after user confirmation and check the result.
+User confirmation and reopening the app are still required; this is not silent installation or rollback.
+
+### Dependency Injection and HTTP Ownership
+
+Pass `packageSource:` / `installationStore:` to the factory for custom protocols/persistence, or use
+`AndroidBootstrap(versionComparer, downloader, hashValidator, apkInstaller, fileStorage, packageSource, installationStore,
+eventDispatcher?, logger?)`. Bootstrap owns disposable downloader/source services; other dependencies, including the store,
+remain host-owned. Cancel and await active work before disposal; early disposal rejects new/queued calls and defers cleanup.
+
+A supplied `HttpClient` is always borrowed, never replaced, and may be combined with request timeout, retry and auth policies.
+TLS/proxy must be configured on its handler; conflicting handler options throw `ArgumentException`.
+Without a supplied client the factory owns and disposes one shared query/download transport.
+Download retries cover transient HEAD/GET/body failures, not metadata queries or permanent errors. User cancellation returns
+`Canceled`; timeouts return `Failed/NetworkError`. Cancellation while waiting for the operation lock throws.
+See [extension and lifetime contracts](../../README-EN.md#extension-points-and-lifetime) for integration details.
 
 ### Pre-check Hook
 
@@ -149,7 +195,7 @@ makes `ValidateAsync` return `UpdateFound == false` with `UpdateState.Completed`
 enum UpdateState
 {
     None, Checking, UpdateAvailable, Downloading, Verifying,
-    ReadyToInstall, Installing, Completed, Failed, Canceled
+    ReadyToInstall, Installing, Completed, Failed, Canceled, InstallationPending, Installed
 }
 
 enum UpdateFailureReason
@@ -166,6 +212,8 @@ enum UpdateFailureReason
 UpdateOperationResult (base record)
 ├── Success, State, FailureReason, Message, PackageInfo, FilePath, Exception
 ├── UpdateCheckResult  →  + UpdateFound, CurrentVersion, TargetVersion
+├── UpdatePreparationResult → + UpdateFound, IsReadyToInstall
+├── InstallationCheckResult → + CurrentVersion, Record, IsInstalled, HasPendingInstallation
 ├── DownloadResult
 ├── HashValidationResult  →  + ActualSha256, ExpectedSha256
 └── InstallResult
@@ -187,7 +235,7 @@ Add the FileProvider to `AndroidManifest.xml`. Its authority must equal
 `AndroidUpdateOptions.FileProviderAuthority`, and the paths below must cover `DownloadDirectoryPath`
 (defaults to `<CacheDir>/update`); a mismatch returns `InstallLaunchFailed`. Pass an `IAndroidActivityProvider`
 to `CreateDefault` to launch the installer from the current Activity. `Success = true` only means the installer
-was launched — the process is killed on completion, so re-check the version on the next launch.
+was launched — the process is killed on completion, so call `CheckInstallationAsync` on the next launch.
 
 ```xml
 <provider

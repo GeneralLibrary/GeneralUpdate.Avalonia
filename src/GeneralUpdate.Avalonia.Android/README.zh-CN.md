@@ -16,6 +16,9 @@
 
 ## 快速开始
 
+`currentVersion` 从 Android PackageManager 读取，`androidPlatformId` 使用服务端配置的编号。
+包含启动时离线核对安装结果的[完整接入示例见根 README](../../README.md#基本使用示例)。
+
 ```bash
 dotnet add package GeneralUpdate.Avalonia.Android
 ```
@@ -40,24 +43,24 @@ var options = new AndroidUpdateOptions
     }
 };
 
-using IAndroidBootstrap bootstrap = GeneralUpdateBootstrap.CreateDefault(options);
+using var bootstrap = GeneralUpdateBootstrap.CreateDefault(options);
 
-var check = await bootstrap.ValidateAsync("2.2.1", CancellationToken.None);
-if (check.Success && check.UpdateFound && check.PackageInfo is { } packageInfo)
+bootstrap.AddListenerUpdateFailed += (_, args) => Console.Error.WriteLine(args.Result.Message);
+var prepared = await bootstrap.PrepareUpdateAsync(currentVersion, CancellationToken.None);
+if (prepared.IsReadyToInstall && prepared.PackageInfo is { } package && prepared.FilePath is { } path)
 {
-    var result = await bootstrap.DownloadAndVerifyAsync(packageInfo, CancellationToken.None);
-    if (result.Success && result.FilePath is not null)
-    {
-        await bootstrap.LaunchInstallerAsync(packageInfo, result.FilePath, CancellationToken.None);
-    }
+    await bootstrap.LaunchInstallerAsync(package, path, CancellationToken.None);
 }
 ```
+
+`PrepareUpdateAsync` 在一个锁内完成查询、pre-check、下载与哈希校验，不打开任何 UI。
+无更新或跳过时成功返回，但 `IsReadyToInstall = false`；原有分阶段 API 仍可使用。
 
 ## API
 
 ### 静态工厂
 
-`GeneralUpdateBootstrap.CreateDefault(options, contextProvider?, activityProvider?, httpClient?, versionComparer?, eventDispatcher?, logger?, httpOptions?)`
+`GeneralUpdateBootstrap.CreateDefault(options, contextProvider?, activityProvider?, httpClient?, versionComparer?, eventDispatcher?, logger?, httpOptions?, packageSource?, installationStore?)`
 
 默认注入链：
 
@@ -71,14 +74,19 @@ if (check.Success && check.UpdateFound && check.PackageInfo is { } packageInfo)
 | `IHashValidator` | `Sha256HashValidator` |
 | `IApkInstaller` | `AndroidApkInstaller` |
 | `IVersionComparer` | `SystemVersionComparer` |
+| `IUpdatePackageSource` | `HttpUpdatePackageClient` |
+| `IInstallationStore` | `JsonFileInstallationStore` |
 
 ### IAndroidBootstrap 方法
 
 | 方法 | 返回类型 |
 |---|---|
+| `PrepareUpdateAsync(currentVersion, ct)` | `UpdatePreparationResult`，`IsReadyToInstall` 表示已校验可安装 |
 | `ValidateAsync(currentVersion, ct)` | `UpdateCheckResult`，包含查询到的 `PackageInfo` |
 | `DownloadAndVerifyAsync(packageInfo, ct)` | `UpdateOperationResult` |
 | `LaunchInstallerAsync(packageInfo, apkFilePath, ct)` | `InstallResult` |
+| `CheckInstallationAsync(currentVersion, ct)` | `InstallationCheckResult` |
+| `ResetInstallationAsync(ct)` | `UpdateOperationResult`，仅清除升级记录 |
 | `GetSnapshot()` | `UpdateStateSnapshot` |
 
 ### 事件
@@ -88,6 +96,7 @@ if (check.Success && check.UpdateFound && check.PackageInfo is { } packageInfo)
 | `AddListenerValidate` | `ValidateEventArgs` |
 | `AddListenerDownloadProgressChanged` | `DownloadProgressChangedEventArgs` |
 | `AddListenerUpdateCompleted` | `UpdateCompletedEventArgs` |
+| `AddListenerInstallationConfirmed` | `InstallationConfirmedEventArgs` |
 | `AddListenerUpdateFailed` | `UpdateFailedEventArgs` |
 
 ### 服务端版本校验
@@ -100,8 +109,36 @@ if (check.Success && check.UpdateFound && check.PackageInfo is { } packageInfo)
 `{"code":200,"body":[...]}`）；设置 `UpdateServer.UseJsonEndpoint = true` 则改为 GET 单个
 `UpdatePackageInfo` JSON。HTTP 204 或空结果表示“无更新”；请求、协议与元数据错误通过
 `UpdateCheckResult.Success`/`FailureReason` 与 `AddListenerUpdateFailed` 上报，不会触发 pre-check。
-未配置 `UpdateServer` 时调用会以 `UpdateFailureReason.InvalidMetadata` 失败。校验请求复用 `CreateDefault`
+未配置 `UpdateServer` 且未注入自定义包源时，调用以 `InvalidMetadata` 失败。校验请求复用 `CreateDefault`
 的 `httpOptions`（`RequestTimeout`、代理、TLS、`AuthProvider`）。完整协议说明与 JSON 示例见仓库根 README。
+
+### 安装结果确认
+
+`CreateDefault` 在拉起安装器前将目标原子写入 `<FilesDir>/update/installation.json`，可通过
+`InstallationStateFilePath` 指定其他持久化位置。同一文件只使用一个 bootstrap；写入失败时不会拉起安装器。
+启动或从安装器返回时，读取 Android PackageManager 的实际版本并调用 `CheckInstallationAsync`。
+核对不依赖网络：`State == None` 表示无安装记录，`HasPendingInstallation` 表示目标尚未安装，
+`IsInstalled` 表示实际版本已达到或超过目标。无效版本和存储错误会明确报错，不当作“无记录”。
+确认结果跨进程保留，`AddListenerInstallationConfirmed` 仅在首次持久化确认时触发；事件不是可靠消息队列，
+重启后的界面恢复应使用返回的 `InstallationCheckResult`。
+
+原有 `AddListenerUpdateCompleted` 保持 `ReadyToInstall` / `Installing` 阶段完成语义，不表示安装成功。
+兼容构造函数未传 `installationStateFilePath` 时使用 `LocalApplicationData/update/installation.json`；
+依赖注入构造函数要求提供 `IInstallationStore`，不再隐式关闭跟踪。记录损坏时，由用户确认后显式调用
+`ResetInstallationAsync` 并检查结果。用户仍需确认安装并重新打开应用，不提供静默安装或回滚。
+
+### 扩展与传输约定
+
+通过工厂的 `packageSource:` / `installationStore:` 注入自定义协议和持久化，或使用接受
+`IUpdatePackageSource` / `IInstallationStore` 的 `AndroidBootstrap` 构造函数替换全部依赖。
+Bootstrap 负责释放可释放的 downloader/source，其他依赖仍由宿主管理。关闭时先取消并等待操作完成，
+再 Dispose；提前 Dispose 会延迟到当前操作退出后释放资源，并拒绝新调用及排队调用。
+
+外部 `HttpClient` 始终保留、由宿主管理，允许同时配置超时、重试和认证；TLS/代理必须配置在它的 handler 上，
+冲突配置会抛 `ArgumentException`。未传客户端时工厂创建并释放一个共享传输客户端。
+瞬态 HEAD/GET/响应流错误会重试续传；元数据查询、永久 HTTP 错误和主动取消不重试。
+超时报 `Failed/NetworkError`，主动取消报 `Canceled`；等待操作锁时取消抛异常。
+详细约定见[根 README](../../README.md#扩展与生命周期)。
 
 ### 更新前回调（Pre-check Hook）
 
@@ -135,6 +172,8 @@ bootstrap.AddListenerUpdatePrecheck(args =>
 UpdateOperationResult (基类)
 ├── Success, State, FailureReason, Message, PackageInfo, FilePath, Exception
 ├── UpdateCheckResult  →  + UpdateFound, CurrentVersion
+├── UpdatePreparationResult → + UpdateFound, IsReadyToInstall
+├── InstallationCheckResult → + CurrentVersion, Record, IsInstalled, HasPendingInstallation
 ├── DownloadResult
 ├── HashValidationResult  →  + ActualSha256, ExpectedSha256
 └── InstallResult
@@ -142,7 +181,7 @@ UpdateOperationResult (基类)
 
 ### 枚举
 
-`UpdateState`: `None`, `Checking`, `UpdateAvailable`, `Downloading`, `Verifying`, `ReadyToInstall`, `Installing`, `Completed`, `Failed`, `Canceled`
+`UpdateState`: `None`, `Checking`, `UpdateAvailable`, `Downloading`, `Verifying`, `ReadyToInstall`, `Installing`, `Completed`, `Failed`, `Canceled`, `InstallationPending`, `Installed`
 
 `UpdateFailureReason`: `None`, `NetworkError`, `Canceled`, `InvalidMetadata`, `FileIoError`, `HashMismatch`, `ServerDoesNotSupportRange`, `InstallPermissionDenied`, `InstallLaunchFailed`, `VersionComparisonFailed`, `Unknown`
 
@@ -159,7 +198,7 @@ UpdateOperationResult (基类)
 `AndroidUpdateOptions.FileProviderAuthority` 一致，下面的 paths 必须覆盖 `DownloadDirectoryPath`
 （默认 `<CacheDir>/update`）；不一致时返回 `InstallLaunchFailed`。建议向 `CreateDefault` 传入
 `IAndroidActivityProvider`，从当前 Activity 拉起安装器。`Success = true` 只表示安装器已拉起，
-安装完成后进程会被系统结束，请在下次启动时重新比较版本以确认结果。
+安装完成后进程会被系统结束，请在下次启动时调用 `CheckInstallationAsync` 确认结果。
 
 ```xml
 <provider
