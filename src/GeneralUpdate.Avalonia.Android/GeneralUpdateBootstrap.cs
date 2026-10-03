@@ -15,8 +15,13 @@ public static class GeneralUpdateBootstrap
         IVersionComparer? versionComparer = null,
         IUpdateEventDispatcher? eventDispatcher = null,
         IUpdateLogger? logger = null,
-        HttpDownloadOptions? httpOptions = null)
+        HttpDownloadOptions? httpOptions = null,
+        IUpdatePackageSource? packageSource = null,
+        IInstallationStore? installationStore = null)
     {
+        ArgumentNullException.ThrowIfNull(options);
+        if (options.DownloadBufferSize <= 0)
+            throw new ArgumentOutOfRangeException(nameof(options.DownloadBufferSize));
         var usedContextProvider = contextProvider ?? new DefaultAndroidContextProvider();
         var context = usedContextProvider.GetContext();
         var effectiveDownloadDirectory = options.DownloadDirectoryPath;
@@ -30,25 +35,33 @@ public static class GeneralUpdateBootstrap
             effectiveDownloadDirectory = Path.Combine(Path.GetTempPath(), "update");
         }
 
-        var effectiveOptions = options with { DownloadDirectoryPath = effectiveDownloadDirectory };
+        var installationStateFilePath = options.InstallationStateFilePath;
+        if (installationStore is null && string.IsNullOrWhiteSpace(installationStateFilePath))
+        {
+            var filesDirectory = context?.FilesDir?.AbsolutePath
+                ?? throw new InvalidOperationException("Android FilesDir is unavailable. Configure InstallationStateFilePath explicitly.");
+            installationStateFilePath = Path.Combine(filesDirectory, "update", "installation.json");
+        }
+
+        var effectiveOptions = options with
+        {
+            DownloadDirectoryPath = effectiveDownloadDirectory,
+            InstallationStateFilePath = installationStateFilePath
+        };
         var usedLogger = logger ?? new NoOpUpdateLogger();
         var usedStorage = new PhysicalFileStorage();
+        var usedInstallationStore = installationStore ?? new JsonFileInstallationStore(installationStateFilePath);
 
-        HttpResumableApkDownloader downloader;
-        if (httpOptions != null)
-        {
-            // Use internal constructor that builds HttpClient from HttpDownloadOptions
-            // (SSL validation, proxy, auth, timeouts)
-            downloader = new HttpResumableApkDownloader(
-                usedStorage, effectiveOptions, httpOptions, usedLogger);
-        }
-        else
-        {
-            // Legacy path: use injected httpClient or a bare new one
-            var usedClient = httpClient ?? new HttpClient();
-            downloader = new HttpResumableApkDownloader(
-                usedClient, usedStorage, effectiveOptions, usedLogger);
-        }
+        var transportOptions = httpOptions ?? new HttpDownloadOptions();
+        var usedClient = UpdateHttpClientFactory.Create(httpClient, httpOptions, out var ownsClient);
+        // Handler settings were applied above; both consumers share the same client and request policies.
+        var requestOptions = transportOptions with { SslValidationPolicy = null, Proxy = null, UseProxy = false };
+        var downloader = new HttpResumableApkDownloader(
+            usedClient, usedStorage, effectiveOptions, usedLogger, requestOptions, ownsClient);
+        var usedComparer = versionComparer ?? new SystemVersionComparer();
+        var usedSource = packageSource ?? new HttpUpdatePackageClient(
+            usedClient, requestOptions.AuthProvider, usedComparer,
+            updateServer: options.UpdateServer, requestTimeout: requestOptions.RequestTimeout);
         var validator = new Sha256HashValidator();
         var installer = new AndroidApkInstaller(
             usedContextProvider,
@@ -57,15 +70,14 @@ public static class GeneralUpdateBootstrap
             usedLogger);
 
         return new AndroidBootstrap(
-            versionComparer ?? new SystemVersionComparer(),
+            usedComparer,
             downloader,
             validator,
             installer,
             usedStorage,
+            usedSource,
+            usedInstallationStore,
             eventDispatcher,
-            usedLogger,
-            options.UpdateServer,
-            httpClient,
-            httpOptions);
+            usedLogger);
     }
 }

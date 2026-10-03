@@ -55,6 +55,8 @@ dotnet test tests/GeneralUpdate.Avalonia.Android.Tests/GeneralUpdate.Avalonia.An
 
 ### Basic Usage
 
+Supply `androidPlatformId` from the host configuration to match the deployed server.
+
 ```csharp
 using GeneralUpdate.Avalonia.Android;
 using GeneralUpdate.Avalonia.Android.Models;
@@ -80,16 +82,26 @@ var options = new AndroidUpdateOptions
 
 using var bootstrap = GeneralUpdateBootstrap.CreateDefault(options);
 
-var check = await bootstrap.ValidateAsync("2.2.1", CancellationToken.None);
-if (check.Success && check.UpdateFound && check.PackageInfo is { } packageInfo)
+bootstrap.AddListenerUpdateFailed += (_, args) => Console.Error.WriteLine(args.Result.Message);
+var context = global::Android.App.Application.Context;
+var currentVersion = context.PackageManager?.GetPackageInfo(context.PackageName!,
+    global::Android.Content.PM.PackageInfoFlags.Activities)?.VersionName
+    ?? throw new InvalidOperationException("Cannot read the installed version.");
+
+var installation = await bootstrap.CheckInstallationAsync(currentVersion);
+if (!installation.Success) return;
+
+var prepared = await bootstrap.PrepareUpdateAsync(currentVersion, CancellationToken.None);
+if (prepared.IsReadyToInstall && prepared.PackageInfo is { } package && prepared.FilePath is { } path)
 {
-    var prepared = await bootstrap.DownloadAndVerifyAsync(packageInfo, CancellationToken.None);
-    if (prepared.Success && prepared.FilePath is not null)
-    {
-        await bootstrap.LaunchInstallerAsync(packageInfo, prepared.FilePath, CancellationToken.None);
-    }
+    await bootstrap.LaunchInstallerAsync(package, path, CancellationToken.None);
 }
 ```
+
+`PrepareUpdateAsync` holds one operation lock across query, comparison, pre-check, download and hash verification.
+No update or a skipped update returns `Success = true`, `IsReadyToInstall = false`. It never opens an installer or
+permission screen. Keep using `ValidateAsync` / `DownloadAndVerifyAsync` when separate stages are needed.
+Use `IUpdateEventDispatcher` to marshal UI events; see permission handling below.
 
 ### Server-Driven Version Validation
 
@@ -123,9 +135,15 @@ then GETs a single `UpdatePackageInfo` (property names are case-insensitive), fo
   `UpdateCheckResult.Success = false`, `FailureReason` and `AddListenerUpdateFailed`, and never invoke the pre-check callback.
 - Cancellation during the request returns `UpdateState.Canceled`; cancelling while waiting on the operation gate throws
   `OperationCanceledException`.
-- Validation and downloads share the `httpOptions` passed to `CreateDefault` (`RequestTimeout`, proxy, TLS, `AuthProvider`).
-  Without `httpOptions` the supplied `httpClient` is reused and its lifetime stays with the host.
-- Calling `ValidateAsync` without `UpdateServer` fails with `UpdateFailureReason.InvalidMetadata`.
+- Validation and downloads share one HTTP client. A supplied `httpClient` is always borrowed and preserved, including its
+  handler and `Timeout`; request timeout, retry and authentication policies may be supplied alongside it. The earlier timeout wins.
+  Configure TLS/proxy on that client's handler: combining those handler settings in `httpOptions` with an external client
+  throws `ArgumentException` instead of silently replacing it. Otherwise the library creates and disposes its own client.
+- Factory defaults: 30-second query/HEAD timeout, 10-minute total download timeout (including backoff), up to 3 download
+  attempts. Transient HEAD/GET/response-stream failures retry with resume; HEAD 405/501 falls back to GET.
+  Permanent errors such as 401 and user cancellation do not retry. `MaxRetryAttempts` includes the initial attempt and does
+  not apply to metadata queries. Timeouts report `Failed/NetworkError`; user cancellation reports `Canceled`.
+- Validation without either `UpdateServer` or an injected `IUpdatePackageSource` fails with `InvalidMetadata`.
 - Only query trusted servers and use HTTPS in production.
 
 Once a newer version is found, the `AddListenerUpdatePrecheck` callback receives the discovered package metadata and returns
@@ -165,12 +183,71 @@ configures all four items below:
    using var bootstrap = GeneralUpdateBootstrap.CreateDefault(options, activityProvider: myActivityProvider);
    ```
 
-4. **Server** — `AndroidUpdateOptions.UpdateServer` must be configured (or use the static JSON endpoint through
-   `UseJsonEndpoint`), and `sha256` must be a 64-character hexadecimal SHA-256.
+4. **Server** — configure `AndroidUpdateOptions.UpdateServer` (or a static JSON endpoint / custom `IUpdatePackageSource`),
+   and provide a 64-character hexadecimal SHA-256.
 
 `LaunchInstallerAsync` returning `Success = true` only means the installer intent was launched; it **does not** mean the user
-finished installing. The process is killed on completion, so compare the installed version with the server again on the next
-launch to confirm the update actually took effect.
+finished installing. The process is killed on completion, so call `CheckInstallationAsync` with the actual installed version
+on the next launch to confirm the update took effect.
+
+### Closing the Installation Loop
+
+`CreateDefault` atomically records the latest installation target **before** launching the installer in
+`<FilesDir>/update/installation.json`, outside the disposable APK cache. Override `InstallationStateFilePath` if needed,
+and use only one bootstrap per journal. If persistence fails, installation is not launched and `FileIoError` is reported.
+The journal contains no download credentials.
+
+At startup or when returning from the installer, read the actual version from Android `PackageManager` and call:
+
+```csharp
+bootstrap.AddListenerInstallationConfirmed += (_, args) =>
+{
+    // args.Result.Record.TargetVersion is the previous target.
+    // args.Result.CurrentVersion is the version read from the device.
+};
+var installation = await bootstrap.CheckInstallationAsync(currentVersion, CancellationToken.None);
+```
+
+`Success` with `State == None` means no recorded attempt, not a successful installation.
+`HasPendingInstallation` means the installed version is below the target: installation may be pending, canceled or failed.
+`IsInstalled` means the installed version reached or exceeded the target (`Installed` state); the outcome is persisted.
+Invalid versions or storage errors return `Success == false` and raise `AddListenerUpdateFailed`, never a silent empty result.
+
+Reconciliation works offline; query `ValidateAsync` separately for further updates. `AddListenerInstallationConfirmed` fires
+only on the first durable confirmation, not on repeated checks or restarts. It is not a reliable message queue; restore UI
+from the returned durable result. The legacy `AddListenerUpdateCompleted` remains a phase notification
+(`ReadyToInstall` / `Installing`), **not installation success**. The compatibility constructor now uses
+`LocalApplicationData/update/installation.json` when `installationStateFilePath` is omitted, rather than disabling tracking.
+The new dependency-injection constructor requires an explicit `IInstallationStore`.
+
+For corrupt records, ask the user before calling `await bootstrap.ResetInstallationAsync()` and check its `Success`.
+Reset only removes the journal, not the installed app, downloads or server settings. Never reset automatically on every failure.
+
+### Extension Points and Lifetime
+
+Implement `IUpdatePackageSource.GetLatestAsync(currentVersion, ct)` for a custom protocol and
+`IInstallationStore.LoadAsync/SaveAsync/ClearAsync` for custom persistence, without duplicating orchestration:
+
+```csharp
+using var bootstrap = GeneralUpdateBootstrap.CreateDefault(options,
+    packageSource: myPackageSource, installationStore: myInstallationStore);
+```
+
+For full dependency injection, use `AndroidBootstrap(versionComparer, downloader, hashValidator, apkInstaller,
+fileStorage, packageSource, installationStore, eventDispatcher?, logger?)`. The default implementations are
+`HttpUpdatePackageClient` and `JsonFileInstallationStore`; the orchestrator no longer depends on their concrete protocols/storage.
+A source returns `null` only for no update, and throws transport/protocol exceptions for failures.
+A store must provide atomic durable writes and report corruption rather than return an empty record.
+
+Use one bootstrap per journal. Bootstrap owns disposable downloader/package-source services; the host owns other injected
+dependencies, including the store. Do not share bootstrap-owned service instances across updaters.
+Cancel and await active work before disposal. Early disposal rejects new/queued operations and defers cleanup until the active
+operation exits; it does not cancel that operation or dispose its semaphore while it is still in use.
+
+The sample persists server settings, reconciles the previous attempt and checks the server at startup, without automatically
+reopening the installer. Users still confirm installation and reopen the app. APKs must have the same package ID, compatible
+signatures and an increasing `versionCode`. Version reconciliation is not APK signature verification or an application health
+check; silent installation, automatic restart and rollback are not provided.
 
 ## Directory Structure
 

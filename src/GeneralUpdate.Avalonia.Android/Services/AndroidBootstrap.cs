@@ -14,10 +14,11 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
     private readonly IFileStorage _fileStorage;
     private readonly IUpdateEventDispatcher _eventDispatcher;
     private readonly IUpdateLogger _logger;
-    private readonly UpdateServerOptions? _updateServer;
-    private readonly HttpUpdatePackageClient? _packageClient;
+    private readonly IUpdatePackageSource _packageSource;
+    private readonly IInstallationStore _installationStore;
     private readonly SemaphoreSlim _operationGate = new(1, 1);
-    private bool _disposed;
+    private volatile bool _disposed;
+    private bool _resourcesDisposed;
 
     private readonly object _sync = new();
     private UpdateStateSnapshot _snapshot = new(UpdateState.None, UpdateFailureReason.None, null);
@@ -33,7 +34,29 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
         IUpdateLogger? logger = null,
         UpdateServerOptions? updateServer = null,
         HttpClient? httpClient = null,
-        HttpDownloadOptions? httpOptions = null)
+        HttpDownloadOptions? httpOptions = null,
+        string? installationStateFilePath = null)
+        : this(versionComparer, downloader, hashValidator, apkInstaller, fileStorage,
+            HttpUpdatePackageClient.Create(httpClient, httpOptions, versionComparer, updateServer),
+            new JsonFileInstallationStore(installationStateFilePath ?? JsonFileInstallationStore.DefaultPath),
+            eventDispatcher, logger)
+    {
+    }
+
+    /// <summary>
+    /// Dependency-injection constructor. Disposable downloader and package source lifetimes are owned by the bootstrap;
+    /// HttpClient ownership is specified when constructing those services.
+    /// </summary>
+    public AndroidBootstrap(
+        IVersionComparer versionComparer,
+        IUpdateDownloader downloader,
+        IHashValidator hashValidator,
+        IApkInstaller apkInstaller,
+        IFileStorage fileStorage,
+        IUpdatePackageSource packageSource,
+        IInstallationStore installationStore,
+        IUpdateEventDispatcher? eventDispatcher = null,
+        IUpdateLogger? logger = null)
     {
         _versionComparer = versionComparer ?? throw new ArgumentNullException(nameof(versionComparer));
         _downloader = downloader ?? throw new ArgumentNullException(nameof(downloader));
@@ -42,16 +65,14 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
         _fileStorage = fileStorage ?? throw new ArgumentNullException(nameof(fileStorage));
         _eventDispatcher = eventDispatcher ?? new ImmediateEventDispatcher();
         _logger = logger ?? new NoOpUpdateLogger();
-        _updateServer = updateServer;
-        if (updateServer is not null)
-        {
-            _packageClient = HttpUpdatePackageClient.Create(httpClient, httpOptions, _versionComparer);
-        }
+        _packageSource = packageSource ?? throw new ArgumentNullException(nameof(packageSource));
+        _installationStore = installationStore ?? throw new ArgumentNullException(nameof(installationStore));
     }
 
     public event EventHandler<ValidateEventArgs>? AddListenerValidate;
     public event EventHandler<DownloadProgressChangedEventArgs>? AddListenerDownloadProgressChanged;
     public event EventHandler<UpdateCompletedEventArgs>? AddListenerUpdateCompleted;
+    public event EventHandler<InstallationConfirmedEventArgs>? AddListenerInstallationConfirmed;
     public event EventHandler<UpdateFailedEventArgs>? AddListenerUpdateFailed;
 
     public UpdateStateSnapshot GetSnapshot()
@@ -76,125 +97,57 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
         await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            ThrowIfDisposed();
+            return await ValidateCoreAsync(currentVersion, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            ReleaseOperation();
+        }
+    }
+
+    private async Task<UpdateCheckResult> ValidateCoreAsync(string currentVersion, CancellationToken cancellationToken)
+    {
+        SetState(UpdateState.Checking, UpdateFailureReason.None, "Checking for updates.");
+
+        UpdatePackageInfo? packageInfo;
+        try
+        {
+            if (string.IsNullOrWhiteSpace(currentVersion))
+            {
+                throw new InvalidDataException("The current application version is required to query the update server.");
+            }
+
             cancellationToken.ThrowIfCancellationRequested();
-            SetState(UpdateState.Checking, UpdateFailureReason.None, "Checking for updates.");
-
-            UpdatePackageInfo? packageInfo;
-            try
+            packageInfo = await _packageSource.GetLatestAsync(currentVersion, cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+        catch (Exception ex) when (IsQueryFailure(ex))
+        {
+            var canceled = ex is OperationCanceledException && cancellationToken.IsCancellationRequested;
+            var failure = new UpdateCheckResult
             {
-                if (string.IsNullOrWhiteSpace(currentVersion))
-                {
-                    throw new InvalidDataException("The current application version is required to query the update server.");
-                }
+                Success = false,
+                UpdateFound = false,
+                State = canceled ? UpdateState.Canceled : UpdateState.Failed,
+                FailureReason = canceled
+                    ? UpdateFailureReason.Canceled
+                    : ex is HttpRequestException or OperationCanceledException or IOException
+                        ? UpdateFailureReason.NetworkError
+                        : UpdateFailureReason.InvalidMetadata,
+                Message = canceled
+                    ? "Update check canceled."
+                    : "Failed to query the update server.",
+                CurrentVersion = currentVersion,
+                Exception = ex
+            };
 
-                if (_updateServer is null || _packageClient is null)
-                {
-                    throw new InvalidDataException("Querying the update server requires AndroidUpdateOptions.UpdateServer.");
-                }
+            HandleFailure(failure);
+            return failure;
+        }
 
-                packageInfo = _updateServer.UseJsonEndpoint
-                    ? await _packageClient.GetPackageInfoAsync(_updateServer.RequestUrl, cancellationToken).ConfigureAwait(false)
-                    : await _packageClient.GetPackageInfoAsync(
-                        _updateServer.RequestUrl,
-                        new UpdatePackageRequest
-                        {
-                            Version = currentVersion,
-                            AppKey = _updateServer.AppKey,
-                            AppType = _updateServer.AppType,
-                            Platform = _updateServer.Platform,
-                            ProductId = _updateServer.ProductId
-                        },
-                        cancellationToken).ConfigureAwait(false);
-                cancellationToken.ThrowIfCancellationRequested();
-            }
-            catch (Exception ex) when (IsQueryFailure(ex))
-            {
-                var canceled = ex is OperationCanceledException && cancellationToken.IsCancellationRequested;
-                var failure = new UpdateCheckResult
-                {
-                    Success = false,
-                    UpdateFound = false,
-                    State = canceled ? UpdateState.Canceled : UpdateState.Failed,
-                    FailureReason = canceled
-                        ? UpdateFailureReason.Canceled
-                        : ex is HttpRequestException or OperationCanceledException or IOException
-                            ? UpdateFailureReason.NetworkError
-                            : UpdateFailureReason.InvalidMetadata,
-                    Message = canceled
-                        ? "Update check canceled."
-                        : "Failed to query the update server.",
-                    CurrentVersion = currentVersion,
-                    Exception = ex
-                };
-
-                HandleFailure(failure);
-                return failure;
-            }
-
-            if (packageInfo is null)
-            {
-                SetState(UpdateState.Completed, UpdateFailureReason.None, "No update available.");
-
-                return new UpdateCheckResult
-                {
-                    Success = true,
-                    UpdateFound = false,
-                    State = UpdateState.Completed,
-                    FailureReason = UpdateFailureReason.None,
-                    Message = "No update available.",
-                    CurrentVersion = currentVersion
-                };
-            }
-
-            if (!_versionComparer.TryCompare(currentVersion, packageInfo.Version, out var compare, out var error))
-            {
-                var failed = new UpdateCheckResult
-                {
-                    Success = false,
-                    UpdateFound = false,
-                    State = UpdateState.Failed,
-                    FailureReason = UpdateFailureReason.VersionComparisonFailed,
-                    Message = error ?? "Failed to compare versions.",
-                    PackageInfo = packageInfo,
-                    CurrentVersion = currentVersion
-                };
-
-                HandleFailure(failed);
-                return failed;
-            }
-
-            if (compare > 0)
-            {
-                var available = new UpdateCheckResult
-                {
-                    Success = true,
-                    UpdateFound = true,
-                    State = UpdateState.UpdateAvailable,
-                    FailureReason = UpdateFailureReason.None,
-                    Message = "Update available.",
-                    PackageInfo = packageInfo,
-                    CurrentVersion = currentVersion
-                };
-
-                if (ShouldSkipUpdate(available, packageInfo, currentVersion))
-                {
-                    var skipped = available with
-                    {
-                        UpdateFound = false,
-                        State = UpdateState.Completed,
-                        Message = "Update skipped by pre-check callback."
-                    };
-
-                    SetState(skipped.State, skipped.FailureReason, skipped.Message);
-                    return skipped;
-                }
-
-                SetState(UpdateState.UpdateAvailable, UpdateFailureReason.None, "Update available.");
-                RaiseValidate(packageInfo, currentVersion);
-
-                return available;
-            }
-
+        if (packageInfo is null)
+        {
             SetState(UpdateState.Completed, UpdateFailureReason.None, "No update available.");
 
             return new UpdateCheckResult
@@ -204,14 +157,71 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
                 State = UpdateState.Completed,
                 FailureReason = UpdateFailureReason.None,
                 Message = "No update available.",
-                PackageInfo = packageInfo,
                 CurrentVersion = currentVersion
             };
         }
-        finally
+
+        if (!_versionComparer.TryCompare(currentVersion, packageInfo.Version, out var compare, out var error))
         {
-            _operationGate.Release();
+            var failed = new UpdateCheckResult
+            {
+                Success = false,
+                UpdateFound = false,
+                State = UpdateState.Failed,
+                FailureReason = UpdateFailureReason.VersionComparisonFailed,
+                Message = error ?? "Failed to compare versions.",
+                PackageInfo = packageInfo,
+                CurrentVersion = currentVersion
+            };
+
+            HandleFailure(failed);
+            return failed;
         }
+
+        if (compare > 0)
+        {
+            var available = new UpdateCheckResult
+            {
+                Success = true,
+                UpdateFound = true,
+                State = UpdateState.UpdateAvailable,
+                FailureReason = UpdateFailureReason.None,
+                Message = "Update available.",
+                PackageInfo = packageInfo,
+                CurrentVersion = currentVersion
+            };
+
+            if (ShouldSkipUpdate(available, packageInfo, currentVersion))
+            {
+                var skipped = available with
+                {
+                    UpdateFound = false,
+                    State = UpdateState.Completed,
+                    Message = "Update skipped by pre-check callback."
+                };
+
+                SetState(skipped.State, skipped.FailureReason, skipped.Message);
+                return skipped;
+            }
+
+            SetState(UpdateState.UpdateAvailable, UpdateFailureReason.None, "Update available.");
+            RaiseValidate(packageInfo, currentVersion);
+
+            return available;
+        }
+
+        SetState(UpdateState.Completed, UpdateFailureReason.None, "No update available.");
+
+        return new UpdateCheckResult
+        {
+            Success = true,
+            UpdateFound = false,
+            State = UpdateState.Completed,
+            FailureReason = UpdateFailureReason.None,
+            Message = "No update available.",
+            PackageInfo = packageInfo,
+            CurrentVersion = currentVersion
+        };
     }
 
     public async Task<UpdateOperationResult> DownloadAndVerifyAsync(UpdatePackageInfo packageInfo, CancellationToken cancellationToken = default)
@@ -220,6 +230,40 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
         await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            ThrowIfDisposed();
+            return await DownloadAndVerifyCoreAsync(packageInfo, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            ReleaseOperation();
+        }
+    }
+
+    public async Task<UpdatePreparationResult> PrepareUpdateAsync(string currentVersion, CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+            var check = await ValidateCoreAsync(currentVersion, cancellationToken).ConfigureAwait(false);
+            if (!check.Success || !check.UpdateFound || check.PackageInfo is null)
+                return UpdatePreparationResult.From(check, check.UpdateFound);
+
+            var prepared = await DownloadAndVerifyCoreAsync(check.PackageInfo, cancellationToken).ConfigureAwait(false);
+            return UpdatePreparationResult.From(prepared, updateFound: true);
+        }
+        finally
+        {
+            ReleaseOperation();
+        }
+    }
+
+    private async Task<UpdateOperationResult> DownloadAndVerifyCoreAsync(UpdatePackageInfo packageInfo, CancellationToken cancellationToken)
+    {
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
             SetState(UpdateState.Downloading, UpdateFailureReason.None, "Downloading package.");
 
             var downloadResult = await _downloader.DownloadAsync(
@@ -227,10 +271,25 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
                 progress => RaiseDownloadProgress(progress),
                 cancellationToken).ConfigureAwait(false);
 
-            if (!downloadResult.Success || string.IsNullOrWhiteSpace(downloadResult.FilePath))
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!downloadResult.Success)
             {
                 HandleFailure(downloadResult);
                 return downloadResult;
+            }
+
+            if (string.IsNullOrWhiteSpace(downloadResult.FilePath))
+            {
+                var invalid = downloadResult with
+                {
+                    Success = false,
+                    State = UpdateState.Failed,
+                    FailureReason = UpdateFailureReason.FileIoError,
+                    Message = "The downloader returned success without a file path.",
+                    PackageInfo = packageInfo
+                };
+                HandleFailure(invalid);
+                return invalid;
             }
 
             if (packageInfo.FileSize > 0)
@@ -255,14 +314,16 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
 
             SetState(UpdateState.Verifying, UpdateFailureReason.None, "Validating package hash.");
             var hashResult = await _hashValidator.ValidateSha256Async(downloadResult.FilePath, packageInfo.Sha256, cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
 
             if (!hashResult.Success)
             {
-                _fileStorage.DeleteFile(downloadResult.FilePath);
+                if (hashResult.FailureReason != UpdateFailureReason.Canceled)
+                    _fileStorage.DeleteFile(downloadResult.FilePath);
                 var failed = hashResult with
                 {
                     PackageInfo = packageInfo,
-                    State = UpdateState.Failed,
+                    State = hashResult.FailureReason == UpdateFailureReason.Canceled ? UpdateState.Canceled : UpdateState.Failed,
                     FailureReason = hashResult.FailureReason == UpdateFailureReason.None ? UpdateFailureReason.HashMismatch : hashResult.FailureReason,
                     Message = hashResult.Message ?? "SHA256 validation failed."
                 };
@@ -284,9 +345,20 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
             RaiseCompleted(completed);
             return completed;
         }
-        finally
+        catch (Exception ex) when (ex is OperationCanceledException or IOException or UnauthorizedAccessException or HttpRequestException)
         {
-            _operationGate.Release();
+            var canceled = ex is OperationCanceledException && cancellationToken.IsCancellationRequested;
+            var failure = new UpdateOperationResult
+            {
+                State = canceled ? UpdateState.Canceled : UpdateState.Failed,
+                FailureReason = canceled ? UpdateFailureReason.Canceled
+                    : ex is HttpRequestException or OperationCanceledException ? UpdateFailureReason.NetworkError : UpdateFailureReason.FileIoError,
+                Message = canceled ? "Package preparation canceled." : "Package preparation failed.",
+                PackageInfo = packageInfo,
+                Exception = ex
+            };
+            HandleFailure(failure);
+            return failure;
         }
     }
 
@@ -296,7 +368,48 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
         await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            ThrowIfDisposed();
             cancellationToken.ThrowIfCancellationRequested();
+            if (!_versionComparer.TryCompare(packageInfo.Version, packageInfo.Version, out _, out var error))
+            {
+                var invalidVersion = new InstallResult
+                {
+                    Success = false,
+                    State = UpdateState.Failed,
+                    FailureReason = UpdateFailureReason.VersionComparisonFailed,
+                    Message = error,
+                    PackageInfo = packageInfo,
+                    FilePath = apkFilePath
+                };
+                HandleFailure(invalidVersion);
+                return invalidVersion;
+            }
+
+            try
+            {
+                // Persist before handing off: Android may kill this process as soon as installation starts.
+                await _installationStore.SaveAsync(new InstallationRecord
+                {
+                    TargetVersion = packageInfo.Version,
+                    RequestedAt = DateTimeOffset.UtcNow
+                }, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (IsInstallationStorageFailure(ex))
+            {
+                var canceled = ex is OperationCanceledException && cancellationToken.IsCancellationRequested;
+                var failure = new InstallResult
+                {
+                    Success = false,
+                    State = canceled ? UpdateState.Canceled : UpdateState.Failed,
+                    FailureReason = canceled ? UpdateFailureReason.Canceled : UpdateFailureReason.FileIoError,
+                    Message = "Could not persist the installation target. The installer was not launched.",
+                    PackageInfo = packageInfo,
+                    FilePath = apkFilePath,
+                    Exception = ex
+                };
+                HandleFailure(failure);
+                return failure;
+            }
             SetState(UpdateState.Installing, UpdateFailureReason.None, "Launching installer.");
 
             var result = await _apkInstaller.LaunchInstallAsync(packageInfo, apkFilePath, cancellationToken).ConfigureAwait(false);
@@ -313,11 +426,164 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
 
             return result;
         }
+        catch (OperationCanceledException ex)
+        {
+            var canceled = cancellationToken.IsCancellationRequested;
+            var failure = new InstallResult
+            {
+                State = canceled ? UpdateState.Canceled : UpdateState.Failed,
+                FailureReason = canceled ? UpdateFailureReason.Canceled : UpdateFailureReason.InstallLaunchFailed,
+                Message = canceled ? "Installer launch canceled." : "Installer launch did not complete.",
+                PackageInfo = packageInfo,
+                FilePath = apkFilePath,
+                Exception = ex
+            };
+            HandleFailure(failure);
+            return failure;
+        }
         finally
         {
-            _operationGate.Release();
+            ReleaseOperation();
         }
     }
+
+    public async Task<InstallationCheckResult> CheckInstallationAsync(
+        string currentVersion, CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+            InstallationCheckResult Fail(UpdateFailureReason reason, string message, Exception? exception = null)
+            {
+                var failure = new InstallationCheckResult
+                {
+                    CurrentVersion = currentVersion,
+                    Success = false,
+                    State = reason == UpdateFailureReason.Canceled ? UpdateState.Canceled : UpdateState.Failed,
+                    FailureReason = reason,
+                    Message = message,
+                    Exception = exception
+                };
+                HandleFailure(failure);
+                return failure;
+            }
+
+            if (!_versionComparer.TryCompare(currentVersion, currentVersion, out _, out var versionError))
+            {
+                return Fail(UpdateFailureReason.VersionComparisonFailed, versionError ?? "Invalid installed version.");
+            }
+
+            InstallationCheckResult result;
+            bool newlyConfirmed;
+            try
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var record = await _installationStore.LoadAsync(cancellationToken).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (record is null)
+                {
+                    SetState(UpdateState.None, UpdateFailureReason.None, "No installation attempt recorded.");
+                    return new InstallationCheckResult
+                    {
+                        CurrentVersion = currentVersion,
+                        Success = true,
+                        State = UpdateState.None,
+                        Message = "No installation attempt recorded."
+                    };
+                }
+
+                if (record.ConfirmedAt.HasValue &&
+                    (!_versionComparer.TryCompare(record.InstalledVersion!, record.TargetVersion, out var confirmedComparison, out _) ||
+                     confirmedComparison > 0))
+                    throw new InvalidDataException("The confirmed installation record contains inconsistent versions.");
+
+                if (!_versionComparer.TryCompare(currentVersion, record.TargetVersion, out var comparison, out versionError))
+                {
+                    return Fail(UpdateFailureReason.VersionComparisonFailed, versionError ?? "Cannot compare installation versions.");
+                }
+
+                var installed = comparison <= 0;
+                newlyConfirmed = installed && record.ConfirmedAt is null;
+                if (newlyConfirmed)
+                {
+                    record = record with { InstalledVersion = currentVersion, ConfirmedAt = DateTimeOffset.UtcNow };
+                    await _installationStore.SaveAsync(record, cancellationToken).ConfigureAwait(false);
+                }
+
+                result = new InstallationCheckResult
+                {
+                    CurrentVersion = currentVersion,
+                    Record = record,
+                    Success = true,
+                    State = installed ? UpdateState.Installed : UpdateState.InstallationPending,
+                    Message = installed
+                        ? "The installed version has reached the recorded update target."
+                        : "The recorded update target is not installed yet. Installation may be pending or canceled."
+                };
+            }
+            catch (Exception ex) when (IsInstallationStorageFailure(ex))
+            {
+                return Fail(
+                    ex is OperationCanceledException && cancellationToken.IsCancellationRequested
+                        ? UpdateFailureReason.Canceled : UpdateFailureReason.FileIoError,
+                    "Could not reconcile the installation record.", ex);
+            }
+
+            SetState(result.State, result.FailureReason, result.Message);
+            if (newlyConfirmed)
+            {
+                _eventDispatcher.Dispatch(() =>
+                    AddListenerInstallationConfirmed?.Invoke(this, new InstallationConfirmedEventArgs(result)));
+            }
+            return result;
+        }
+        finally
+        {
+            ReleaseOperation();
+        }
+    }
+
+    public async Task<UpdateOperationResult> ResetInstallationAsync(CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+            cancellationToken.ThrowIfCancellationRequested();
+            await _installationStore.ClearAsync(cancellationToken).ConfigureAwait(false);
+            var result = new UpdateOperationResult
+            {
+                Success = true,
+                State = UpdateState.None,
+                Message = "Installation record cleared. The installed application was not modified."
+            };
+            SetState(result.State, result.FailureReason, result.Message);
+            return result;
+        }
+        catch (Exception ex) when (IsInstallationStorageFailure(ex))
+        {
+            var canceled = ex is OperationCanceledException && cancellationToken.IsCancellationRequested;
+            var failure = new UpdateOperationResult
+            {
+                State = canceled ? UpdateState.Canceled : UpdateState.Failed,
+                FailureReason = canceled ? UpdateFailureReason.Canceled : UpdateFailureReason.FileIoError,
+                Message = "Could not clear the installation record.",
+                Exception = ex
+            };
+            HandleFailure(failure);
+            return failure;
+        }
+        finally
+        {
+            ReleaseOperation();
+        }
+    }
+
+    private static bool IsInstallationStorageFailure(Exception ex) =>
+        ex is IOException or InvalidDataException or UnauthorizedAccessException or JsonException or OperationCanceledException;
 
     /// <summary>
     /// Transport, protocol and metadata problems are reported as validation failures.
@@ -381,20 +647,45 @@ public sealed class AndroidBootstrap : IAndroidBootstrap
 
     public void Dispose()
     {
-        if (_disposed)
+        lock (_sync)
         {
-            return;
+            if (_disposed) return;
+            _disposed = true;
+            if (_operationGate.CurrentCount != 0)
+                DisposeResources();
         }
+    }
 
-        _operationGate.Dispose();
-        _packageClient?.Dispose();
-
-        if (_downloader is IDisposable disposableDownloader)
+    private void ReleaseOperation()
+    {
+        lock (_sync)
         {
-            disposableDownloader.Dispose();
+            try
+            {
+                if (_disposed) DisposeResources();
+            }
+            finally
+            {
+                // Keep the managed gate alive so queued callers can observe ObjectDisposedException.
+                _operationGate.Release();
+            }
         }
+    }
 
-        _disposed = true;
+    private void DisposeResources()
+    {
+        if (_resourcesDisposed) return;
+        _resourcesDisposed = true;
+        try
+        {
+            if (_packageSource is IDisposable disposableSource)
+                disposableSource.Dispose();
+        }
+        finally
+        {
+            if (_downloader is IDisposable disposableDownloader)
+                disposableDownloader.Dispose();
+        }
     }
 
     private void ThrowIfDisposed()

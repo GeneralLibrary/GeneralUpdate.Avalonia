@@ -10,10 +10,10 @@ namespace GeneralUpdate.Avalonia.Android.Services;
 
 /// <summary>
 /// Retrieves the update package metadata published by a server without comparing the installed
-/// version or starting a download. The caller owns the supplied <see cref="HttpClient"/>,
-/// including its timeout and transport configuration.
+/// version or starting a download. The supplied <see cref="HttpClient"/> is borrowed by default;
+/// set ownsClient to transfer its lifetime. Its timeout and handler are never changed.
 /// </summary>
-internal sealed class HttpUpdatePackageClient : IDisposable
+public sealed class HttpUpdatePackageClient : IUpdatePackageSource, IDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -24,39 +24,52 @@ internal sealed class HttpUpdatePackageClient : IDisposable
     private readonly IHttpAuthProvider? _authProvider;
     private readonly IVersionComparer _versionComparer;
     private readonly bool _ownsClient;
+    private readonly UpdateServerOptions? _updateServer;
+    private readonly TimeSpan _requestTimeout;
 
     /// <summary>
-    /// Creates a client from the HTTP transport settings when available, otherwise reuses
-    /// (or creates) the host-supplied <see cref="HttpClient"/>.
+    /// Reuses the supplied client with request policies, or creates an owned transport.
     /// </summary>
     internal static HttpUpdatePackageClient Create(
-        HttpClient? httpClient, HttpDownloadOptions? httpOptions, IVersionComparer versionComparer)
+        HttpClient? httpClient, HttpDownloadOptions? httpOptions, IVersionComparer versionComparer,
+        UpdateServerOptions? updateServer = null)
     {
-        if (httpOptions is not null)
-        {
-            var client = new HttpClient(httpOptions.BuildHandler())
-            {
-                Timeout = httpOptions.RequestTimeout
-            };
-            return new HttpUpdatePackageClient(client, httpOptions.AuthProvider, versionComparer, ownsClient: true);
-        }
-
+        var client = UpdateHttpClientFactory.Create(httpClient, httpOptions, out var ownsClient);
         return new HttpUpdatePackageClient(
-            httpClient ?? new HttpClient(),
-            versionComparer: versionComparer,
-            ownsClient: httpClient is null);
+            client, httpOptions?.AuthProvider, versionComparer, ownsClient, updateServer, httpOptions?.RequestTimeout);
     }
 
     public HttpUpdatePackageClient(
         HttpClient httpClient,
         IHttpAuthProvider? authProvider = null,
         IVersionComparer? versionComparer = null,
-        bool ownsClient = false)
+        bool ownsClient = false,
+        UpdateServerOptions? updateServer = null,
+        TimeSpan? requestTimeout = null)
     {
         _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
         _authProvider = authProvider;
         _versionComparer = versionComparer ?? new SystemVersionComparer();
         _ownsClient = ownsClient;
+        _updateServer = updateServer;
+        _requestTimeout = requestTimeout ?? TimeSpan.FromSeconds(30);
+    }
+
+    public Task<UpdatePackageInfo?> GetLatestAsync(string currentVersion, CancellationToken cancellationToken = default)
+    {
+        if (_updateServer is null)
+            throw new InvalidDataException("Configure UpdateServer or supply an IUpdatePackageSource.");
+
+        return _updateServer.UseJsonEndpoint
+            ? GetPackageInfoAsync(_updateServer.RequestUrl, cancellationToken)
+            : GetPackageInfoAsync(_updateServer.RequestUrl, new UpdatePackageRequest
+            {
+                Version = currentVersion,
+                AppKey = _updateServer.AppKey,
+                AppType = _updateServer.AppType,
+                Platform = _updateServer.Platform,
+                ProductId = _updateServer.ProductId
+            }, cancellationToken);
     }
 
     public void Dispose()
@@ -91,7 +104,7 @@ internal sealed class HttpUpdatePackageClient : IDisposable
     /// POSTs the GeneralUpdate verification request and returns the newest non-frozen full APK.
     /// An empty eligible package list or HTTP 204 means no package; other package formats are ignored.
     /// </summary>
-    public async Task<UpdatePackageInfo?> GetPackageInfoAsync(
+    internal async Task<UpdatePackageInfo?> GetPackageInfoAsync(
         string requestUrl, UpdatePackageRequest packageRequest, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(packageRequest);
@@ -161,13 +174,15 @@ internal sealed class HttpUpdatePackageClient : IDisposable
 
     private async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(_requestTimeout);
         request.Headers.Accept.ParseAdd("application/json");
         if (_authProvider is not null)
         {
-            await _authProvider.ApplyAuthAsync(request, cancellationToken).ConfigureAwait(false);
+            await _authProvider.ApplyAuthAsync(request, timeout.Token).ConfigureAwait(false);
         }
 
-        var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        var response = await _httpClient.SendAsync(request, timeout.Token).ConfigureAwait(false);
         try
         {
             response.EnsureSuccessStatusCode();

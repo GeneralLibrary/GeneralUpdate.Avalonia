@@ -58,6 +58,9 @@ jobs:
       - name: Build Android project
         run: dotnet build src/GeneralUpdate.Avalonia.Android/GeneralUpdate.Avalonia.Android.csproj --configuration Release --no-restore
 
+      - name: Build Android upgrade sample
+        run: dotnet build samples/GeneralUpdate.Avalonia.Android.Sample/GeneralUpdate.Avalonia.Android.Sample.csproj --configuration Release
+
       - name: Pack NuGet
         run: dotnet pack src/GeneralUpdate.Avalonia.Android/GeneralUpdate.Avalonia.Android.csproj --configuration Release --no-build -o artifacts
 

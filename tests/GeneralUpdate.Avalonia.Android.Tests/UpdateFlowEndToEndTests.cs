@@ -20,8 +20,10 @@ public sealed class UpdateFlowEndToEndTests
     private const string MetadataUrl = "https://example.com/metadata";
     private const string ApkUrl = "https://example.com/app.apk";
 
-    [Fact]
-    public async Task FullFlow_WhenUpdateIsAvailable_DownloadsVerifiesAndHandsOffToInstaller()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FullFlow_WhenUpdateIsAvailable_DownloadsVerifiesAndHandsOffToInstaller(bool usePreparationApi)
     {
         var directory = CreateTemporaryDirectory();
         try
@@ -32,26 +34,36 @@ public sealed class UpdateFlowEndToEndTests
             var storage = new PhysicalFileStorage();
             var installer = new RecordingInstaller();
             using var downloader = new HttpResumableApkDownloader(http, storage, new AndroidUpdateOptions { DownloadDirectoryPath = directory });
-            using var bootstrap = CreateBootstrap(downloader, storage, installer, http);
+            var statePath = Path.Combine(directory, "state", "installation.json");
+            using var bootstrap = CreateBootstrap(downloader, storage, installer, http, statePath);
 
             var progressEvents = 0;
             var validateRaised = false;
             bootstrap.AddListenerValidate += (_, _) => validateRaised = true;
             bootstrap.AddListenerDownloadProgressChanged += (_, _) => Interlocked.Increment(ref progressEvents);
 
-            // 1. Validate: the server is queried internally with the installed version.
-            var check = await bootstrap.ValidateAsync("1.0.0");
-
-            Assert.True(check.Success, check.Message);
-            Assert.True(check.UpdateFound);
-            Assert.Equal(UpdateState.UpdateAvailable, check.State);
+            UpdateOperationResult prepared;
+            if (usePreparationApi)
+            {
+                var result = await bootstrap.PrepareUpdateAsync("1.0.0");
+                Assert.True(result.UpdateFound);
+                Assert.True(result.IsReadyToInstall);
+                prepared = result;
+            }
+            else
+            {
+                var check = await bootstrap.ValidateAsync("1.0.0");
+                Assert.True(check.Success, check.Message);
+                Assert.True(check.UpdateFound);
+                Assert.Equal(UpdateState.UpdateAvailable, check.State);
+                Assert.NotNull(check.PackageInfo);
+                prepared = await bootstrap.DownloadAndVerifyAsync(check.PackageInfo);
+            }
             Assert.True(validateRaised);
-            var package = check.PackageInfo;
+            var package = prepared.PackageInfo;
             Assert.NotNull(package);
             Assert.Equal("2.0.0", package.Version);
-
-            // 2. Download and verify: resumable downloader writes to the real file system.
-            var prepared = await bootstrap.DownloadAndVerifyAsync(package);
+            Assert.Null(installer.Package);
 
             Assert.True(prepared.Success, prepared.Message + " " + prepared.Exception);
             Assert.Equal(UpdateState.ReadyToInstall, prepared.State);
@@ -68,6 +80,18 @@ public sealed class UpdateFlowEndToEndTests
             Assert.Equal(UpdateState.Installing, bootstrap.GetSnapshot().State);
             Assert.Same(package, installer.Package);
             Assert.Equal(prepared.FilePath, installer.Path);
+
+            // A replacement process confirms the installed version, independently of the server.
+            bootstrap.Dispose();
+            using var restartedDownloader = new HttpResumableApkDownloader(http, storage,
+                new AndroidUpdateOptions { DownloadDirectoryPath = directory });
+            using var restarted = CreateBootstrap(restartedDownloader, storage, new RecordingInstaller(), http, statePath);
+            var confirmation = await restarted.CheckInstallationAsync("2.0.0");
+            Assert.True(confirmation.IsInstalled);
+            Assert.Equal("2.0.0", confirmation.Record!.TargetVersion);
+            var nextCheck = await restarted.ValidateAsync("2.0.0");
+            Assert.True(nextCheck.Success);
+            Assert.False(nextCheck.UpdateFound);
         }
         finally
         {
@@ -143,12 +167,14 @@ public sealed class UpdateFlowEndToEndTests
         IUpdateDownloader downloader,
         IFileStorage storage,
         IApkInstaller installer,
-        HttpClient httpClient) =>
+        HttpClient httpClient,
+        string? statePath = null) =>
         new(new SystemVersionComparer(), downloader, new Sha256HashValidator(), installer, storage,
             eventDispatcher: new ImmediateEventDispatcher(),
             logger: new NoOpUpdateLogger(),
             updateServer: new UpdateServerOptions { RequestUrl = MetadataUrl, UseJsonEndpoint = true },
-            httpClient: httpClient);
+            httpClient: httpClient,
+            installationStateFilePath: statePath);
 
     private static byte[] CreateApkBytes()
     {

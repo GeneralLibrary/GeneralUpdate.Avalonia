@@ -11,5 +11,7 @@ public enum UpdateState
     Installing = 6,
     Completed = 7,
     Failed = 8,
-    Canceled = 9
+    Canceled = 9,
+    InstallationPending = 10,
+    Installed = 11
 }

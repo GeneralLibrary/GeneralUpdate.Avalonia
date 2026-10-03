@@ -55,6 +55,8 @@ dotnet test tests/GeneralUpdate.Avalonia.Android.Tests/GeneralUpdate.Avalonia.An
 
 ### 基本使用示例
 
+示例中的 `androidPlatformId` 由宿主配置为服务端实际使用的 Android 平台编号。
+
 ```csharp
 using GeneralUpdate.Avalonia.Android;
 using GeneralUpdate.Avalonia.Android.Models;
@@ -80,16 +82,26 @@ var options = new AndroidUpdateOptions
 
 using var bootstrap = GeneralUpdateBootstrap.CreateDefault(options);
 
-var check = await bootstrap.ValidateAsync("2.2.1", CancellationToken.None);
-if (check.Success && check.UpdateFound && check.PackageInfo is { } packageInfo)
+bootstrap.AddListenerUpdateFailed += (_, args) => Console.Error.WriteLine(args.Result.Message);
+var context = global::Android.App.Application.Context;
+var currentVersion = context.PackageManager?.GetPackageInfo(context.PackageName!,
+    global::Android.Content.PM.PackageInfoFlags.Activities)?.VersionName
+    ?? throw new InvalidOperationException("无法读取本机版本。");
+
+// 启动时先离线核对上次安装；记录损坏时明确报错，不自动清空。
+var installation = await bootstrap.CheckInstallationAsync(currentVersion);
+if (!installation.Success) return;
+
+var prepared = await bootstrap.PrepareUpdateAsync(currentVersion, CancellationToken.None);
+if (prepared.IsReadyToInstall && prepared.PackageInfo is { } package && prepared.FilePath is { } path)
 {
-    var prepared = await bootstrap.DownloadAndVerifyAsync(packageInfo, CancellationToken.None);
-    if (prepared.Success && prepared.FilePath is not null)
-    {
-        await bootstrap.LaunchInstallerAsync(packageInfo, prepared.FilePath, CancellationToken.None);
-    }
+    await bootstrap.LaunchInstallerAsync(package, path, CancellationToken.None);
 }
 ```
+
+`PrepareUpdateAsync` 在一个操作锁内完成查询、版本比较、pre-check、下载和哈希校验；没有更新或被跳过时
+`Success = true`、`IsReadyToInstall = false`。它不会打开安装器或权限页面。需要只检查版本或分阶段控制时，
+仍可使用 `ValidateAsync` / `DownloadAndVerifyAsync`。UI 线程切换使用 `IUpdateEventDispatcher`，权限处理见下文。
 
 ### 服务端版本校验
 
@@ -121,9 +133,14 @@ ZIP、差分包、驱动包不会交给 Android 安装器；`body` 为空数组�
 - HTTP 204 或 GET JSON `null` 表示无包；请求、协议与元数据错误通过 `UpdateCheckResult.Success = false`、
   `FailureReason` 和 `AddListenerUpdateFailed` 上报，并且不会触发 pre-check。
 - 请求期间取消返回 `UpdateState.Canceled`；等待操作锁时取消会抛出 `OperationCanceledException`。
-- 查询与下载共用 `CreateDefault` 的 `httpOptions`（`RequestTimeout`、代理、TLS 与 `AuthProvider`）；
-  未提供 `httpOptions` 时复用传入的 `httpClient`，其生命周期仍由宿主管理。
-- 未配置 `UpdateServer` 时调用 `ValidateAsync` 会以 `UpdateFailureReason.InvalidMetadata` 失败。
+- 查询与下载共用 `CreateDefault` 的一个 HTTP 客户端。外部 `httpClient` 始终保留并由宿主管理，
+  可同时传入超时、重试和认证策略；不会改写该客户端的 `Timeout`，实际生效的是较早到期的限制。
+  外部客户端的 TLS/代理必须配置在其 handler 上；同时通过 `httpOptions` 指定 TLS/代理会明确抛出
+  `ArgumentException`，不会静默替换客户端。未传客户端时，组件创建并释放自己的客户端。
+- 工厂默认查询/HEAD 超时 30 秒，整个下载（含重试等待）超时 10 分钟，最多 3 次下载尝试。
+  HEAD/GET/响应流的瞬态网络失败会重试并续传，HEAD 返回 405/501 时改用 GET；401 等永久错误及主动取消不重试。
+  `MaxRetryAttempts` 包含首次尝试，不作用于元数据查询。超时报告 `Failed/NetworkError`，主动取消报告 `Canceled`。
+- 未配置 `UpdateServer` 且未注入 `IUpdatePackageSource` 时，版本查询以 `InvalidMetadata` 失败。
 - 仅应查询可信服务器，生产环境请使用 HTTPS。
 
 发现新版本后，`AddListenerUpdatePrecheck` 回调会拿到最新包信息，返回 `true` 跳过、`false` 继续
@@ -162,11 +179,68 @@ ZIP、差分包、驱动包不会交给 Android 安装器；`body` 为空数组�
    using var bootstrap = GeneralUpdateBootstrap.CreateDefault(options, activityProvider: myActivityProvider);
    ```
 
-4. **服务端**：必须配置 `AndroidUpdateOptions.UpdateServer`（或改用 `UseJsonEndpoint` 的静态 JSON），
+4. **服务端**：配置 `AndroidUpdateOptions.UpdateServer`（或静态 JSON / 自定义 `IUpdatePackageSource`），
    且 `sha256` 为 64 位十六进制 SHA-256。
 
 `LaunchInstallerAsync` 返回 `Success = true` 只表示安装器已拉起，**不代表用户已完成安装**：安装完成后进程会被
-系统结束，下次启动时请自行比较本机版本与服务端版本，以确认这次更新是否真正生效。
+系统结束，下次启动时调用 `CheckInstallationAsync` 核对本机实际版本，以确认这次更新是否真正生效。
+
+### 升级结果闭环
+
+`CreateDefault` 默认在 `<FilesDir>/update/installation.json` 保存最近一次安装目标，而不是保存在可被清理的
+APK 缓存中。可以通过 `InstallationStateFilePath` 指定其他持久化位置。同一文件只使用一个 bootstrap 实例。
+安装目标在拉起安装器**之前**原子写入；写入失败会返回 `FileIoError`，不会继续拉起安装器。记录不包含下载令牌。
+
+宿主在启动或从安装器返回时，从 Android `PackageManager` 读取当前版本，再调用：
+
+```csharp
+bootstrap.AddListenerInstallationConfirmed += (_, args) =>
+{
+    // args.Result.Record.TargetVersion：上次安装目标
+    // args.Result.CurrentVersion：本次从设备读取的实际版本
+};
+var installation = await bootstrap.CheckInstallationAsync(currentVersion, CancellationToken.None);
+```
+
+| 结果 | 含义 |
+|---|---|
+| `Success && State == None` | 没有安装记录，不表示安装成功 |
+| `HasPendingInstallation` | 当前版本低于目标，安装尚未确认；可能取消、失败或仍在进行，可重新检查并重试升级 |
+| `IsInstalled` | 本机版本已达到或超过目标，状态为 `Installed`，确认结果已持久化 |
+| `!Success` | 本机版本无效或记录读取/写入失败，通过 `AddListenerUpdateFailed` 报错，不伪装成“无记录” |
+
+该核对不依赖网络；随后可调用 `ValidateAsync` 查询是否还有更新。`AddListenerInstallationConfirmed`
+只在首次持久化确认时触发，重复核对或进程重启不会重复发送；它不是可靠消息队列，界面恢复应以返回的持久化结果为准。
+原有 `AddListenerUpdateCompleted` 保持兼容，仍表示 `ReadyToInstall` / `Installing` 阶段完成，**不能用作安装成功通知**。
+兼容构造函数不再隐式禁用跟踪：未指定 `installationStateFilePath` 时使用应用
+`LocalApplicationData/update/installation.json`。新依赖注入构造函数要求显式提供 `IInstallationStore`。
+
+记录损坏时，由宿主明确提示用户后调用 `await bootstrap.ResetInstallationAsync()`，并检查返回的 `Success`。
+重置只删除升级记录，不修改已安装应用、下载文件或服务端配置；不要在遇到任何错误时自动重置。
+
+### 扩展与生命周期
+
+自有协议实现 `IUpdatePackageSource.GetLatestAsync(currentVersion, ct)`，数据库等存储实现
+`IInstallationStore.LoadAsync/SaveAsync/ClearAsync`，通过工厂的命名参数注入即可，不必复制流程代码：
+
+```csharp
+using var bootstrap = GeneralUpdateBootstrap.CreateDefault(options,
+    packageSource: myPackageSource, installationStore: myInstallationStore);
+```
+
+需要替换全部环节时，使用 `AndroidBootstrap(versionComparer, downloader, hashValidator, apkInstaller,
+fileStorage, packageSource, installationStore, eventDispatcher?, logger?)`。HTTP 协议和 JSON 持久化分别由
+`HttpUpdatePackageClient`、`JsonFileInstallationStore` 实现，流程类不再绑定这些具体实现。
+自定义源返回 `null` 表示无更新，网络/协议错误应抛出对应异常；存储须持久化原子写入，损坏数据应报错，不能返回空记录。
+
+一个升级器对应一个安装记录。Bootstrap 负责释放实现 `IDisposable` 的 downloader/package source；
+其余注入依赖（包括 store）由宿主管理，不要跨升级器共享由 Bootstrap 拥有的服务实例。
+关闭页面时先取消并等待当前操作，再 `Dispose`。提前 Dispose 会拒绝新调用和排队调用，并延迟到当前操作退出后释放资源，
+不会自动取消当前操作，也不会在其 `finally` 释放信号量时抛异常。
+
+示例会保存服务端配置，启动时核对上次升级并自动检查服务端，单独显示升级结果；它不会自动重复弹出安装器。
+用户仍需确认系统安装并重新打开应用。生产 APK 必须保持相同包名、兼容签名和递增的 `versionCode`；
+本机版本核对不是 APK 签名校验或应用健康检查，也不提供静默安装、自动重启或回滚。
 
 ## 目录结构
 

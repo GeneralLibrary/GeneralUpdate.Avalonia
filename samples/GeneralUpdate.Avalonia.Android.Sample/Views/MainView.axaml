@@ -1,5 +1,8 @@
 <UserControl xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:GeneralUpdate.Avalonia.Android.Sample.ViewModels"
+             x:DataType="vm:UpdateViewModel"
+             x:CompileBindings="True"
              x:Class="GeneralUpdate.Avalonia.Android.Sample.Views.MainView">
   <ScrollViewer>
     <StackPanel Margin="20" Spacing="12">
@@ -17,6 +20,7 @@
               RowDefinitions="Auto,Auto">
           <TextBlock Grid.Row="0" Grid.Column="0" Text="当前版本：" />
           <TextBlock x:Name="CurrentVersionText"
+                     Text="{Binding CurrentVersion}"
                      Grid.Row="0"
                      Grid.Column="1"
                      FontWeight="SemiBold" />
@@ -24,9 +28,13 @@
           <TextBlock x:Name="TargetVersionText"
                      Grid.Row="1"
                      Grid.Column="1"
-                     Text="尚未检查" />
+                     Text="{Binding TargetVersion}" />
         </Grid>
       </Border>
+
+      <TextBlock x:Name="InstallationStatusText"
+                 Text="{Binding InstallationStatus}"
+                 TextWrapping="Wrap" />
 
       <TextBlock Text="GeneralSpacestation 配置"
                  FontSize="18"
@@ -35,12 +43,12 @@
 
       <TextBlock Text="验证接口" />
       <TextBox x:Name="RequestUrlTextBox"
-               Text="http://127.0.0.1:5080/Upgrade/Verification"
+               Text="{Binding RequestUrl, Mode=TwoWay}"
                PlaceholderText="https://server/Upgrade/Verification" />
 
       <TextBlock Text="AppKey" />
       <TextBox x:Name="AppKeyTextBox"
-               Text="demo-client"
+               Text="{Binding AppKey, Mode=TwoWay}"
                PlaceholderText="管理端配置的 AppKey" />
 
       <Grid ColumnDefinitions="*,*"
@@ -48,13 +56,13 @@
         <StackPanel Grid.Column="0" Spacing="6">
           <TextBlock Text="Platform" />
           <TextBox x:Name="PlatformTextBox"
-                   Text="3"
+                   Text="{Binding Platform, Mode=TwoWay}"
                    PlaceholderText="Android 平台编号" />
         </StackPanel>
         <StackPanel Grid.Column="1" Spacing="6">
           <TextBlock Text="ProductId" />
           <TextBox x:Name="ProductIdTextBox"
-                   Text="demo-product"
+                   Text="{Binding ProductId, Mode=TwoWay}"
                    PlaceholderText="产品编号" />
         </StackPanel>
       </Grid>
@@ -63,24 +71,24 @@
                  FontWeight="SemiBold"
                  Margin="0,8,0,0" />
       <TextBlock x:Name="ReleaseNotesText"
-                 Text="检查到新版本后显示"
+                 Text="{Binding ReleaseNotes}"
                  TextWrapping="Wrap"
                  MinHeight="44" />
 
       <ProgressBar x:Name="DownloadProgressBar"
                    Minimum="0"
                    Maximum="100"
-                   Value="0"
+                   Value="{Binding Progress}"
                    Height="8" />
       <TextBlock x:Name="ProgressText"
-                 Text="0%"
+                 Text="{Binding ProgressText}"
                  HorizontalAlignment="Right" />
 
       <Border Padding="12"
               CornerRadius="8"
               Background="#12000000">
         <TextBlock x:Name="StatusText"
-                   Text="等待检查更新"
+                   Text="{Binding Status}"
                    TextWrapping="Wrap" />
       </Border>
 
@@ -91,14 +99,18 @@
                 Grid.Column="0"
                 Content="检查并自动升级"
                 HorizontalAlignment="Stretch"
+                IsEnabled="{Binding CanStart}"
                 Click="OnStartUpdate" />
         <Button x:Name="CancelButton"
                 Grid.Column="1"
                 Content="取消"
                 HorizontalAlignment="Stretch"
-                IsEnabled="False"
+                IsEnabled="{Binding CanCancel}"
                 Click="OnCancelUpdate" />
       </Grid>
+      <Button Content="重置升级记录（不修改已安装应用）"
+              IsEnabled="{Binding CanStart}"
+              Click="OnResetInstallation" />
     </StackPanel>
   </ScrollViewer>
 </UserControl>
