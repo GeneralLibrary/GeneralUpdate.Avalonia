@@ -41,6 +41,9 @@ ScaffoldingReadMe.txt
 *~
 CodeCoverage/
 
+# Android sample demo script output
+samples/**/run-demo.log
+
 # MSBuild Binary and Structured Log
 *.binlog
 

@@ -1,0 +1,2 @@
+{"sequence":1,"timestamp":"2026-10-02T19:37:08.1694662+08:00","event_type":"state_change","task_id":"1ac2f72da183ca06--pwsh-1","session_id":"","state":"running","runtime_state":"alive"}
+{"sequence":2,"timestamp":"2026-10-02T19:37:48.5579426+08:00","event_type":"state_change","task_id":"1ac2f72da183ca06--pwsh-1","session_id":"","state":"cancelled","runtime_state":"exited","error_code":"job_failed"}

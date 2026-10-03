@@ -172,6 +172,8 @@ ZIP、差分包、驱动包不会交给 Android 安装器；`body` 为空数组�
 
 ```text
 GeneralUpdate.Avalonia/
+├── samples/
+│   └── GeneralUpdate.Avalonia.Android.Sample/ # GeneralSpacestation Android 自动升级示例
 ├── src/
 │   └── GeneralUpdate.Avalonia.Android/   # Android 自动更新核心库
 ├── tests/
@@ -180,6 +182,15 @@ GeneralUpdate.Avalonia/
 ├── README-EN.md
 └── LICENSE
 ```
+
+## 完整移动端示例
+
+[`samples/GeneralUpdate.Avalonia.Android.Sample`](./samples/GeneralUpdate.Avalonia.Android.Sample)
+提供可运行的 Avalonia Android 示例，覆盖 GeneralSpacestation 版本校验、断点续传、SHA-256
+校验、未知来源安装授权和 APK 安装器拉起。示例界面可直接填写验证接口、`AppKey`、Android
+平台编号和 `ProductId`。连接 Android 设备后可运行
+`samples\GeneralUpdate.Avalonia.Android.Sample\run-demo.cmd`，自动构建 `1.0.0`/`2.0.0`
+两个 APK、启动兼容验证协议的本地服务并安装演示初始版本。
 
 ## 贡献指南
 
