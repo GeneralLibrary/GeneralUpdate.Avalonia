@@ -123,6 +123,44 @@ public sealed class UpdateViewModelTests
         Assert.Equal(0, host.Downloads);
     }
 
+    [Theory]
+    [InlineData(UpdateLanguage.English, "New version found.")]
+    [InlineData(UpdateLanguage.Chinese, "发现新版本")]
+    public async Task LanguageSelection_LocalizesUiAndConfiguresBootstrap(UpdateLanguage language, string expectedStatus)
+    {
+        using var host = new FakeHost { Language = language };
+        var model = Create(host);
+
+        await model.InitializeAsync();
+
+        Assert.Contains(expectedStatus, model.Status);
+        Assert.Contains(language == UpdateLanguage.Chinese ? "GeneralUpdate 移动端" : "GeneralUpdate mobile", model.Title);
+        Assert.All(host.BootstrapLanguages, configured => Assert.Equal(language, configured));
+
+        model.LanguageIndex = language == UpdateLanguage.Chinese ? 0 : 1;
+        var selected = language == UpdateLanguage.Chinese ? UpdateLanguage.English : UpdateLanguage.Chinese;
+
+        Assert.Equal(selected, model.Language);
+        Assert.Equal(selected, host.SavedLanguage);
+        Assert.Equal(selected, host.BootstrapLanguages.Last());
+        Assert.Contains(selected == UpdateLanguage.Chinese ? "发现新版本" : "New version found", model.Status);
+    }
+
+    [Theory]
+    [InlineData(UpdateLanguage.English, "Enter a valid HTTP or HTTPS verification URL.")]
+    [InlineData(UpdateLanguage.Chinese, "请输入有效的 HTTP 或 HTTPS 验证接口地址。")]
+    public async Task InvalidInputException_IsDisplayedInSelectedLanguage(UpdateLanguage language, string expectedMessage)
+    {
+        using var host = new FakeHost { Language = language };
+        var model = Create(host);
+        await model.InitializeAsync();
+        model.RequestUrl = "not-a-url";
+
+        await model.StartAsync();
+
+        Assert.Contains(expectedMessage, model.Status);
+    }
+
     private static UpdateViewModel Create(FakeHost host) => new(host, new NoOpUpdateLogger());
 
     private sealed class FakeHost : IUpdateHost, IDisposable
@@ -133,27 +171,32 @@ public sealed class UpdateViewModelTests
         public bool FailSettingsSave { get; set; }
         public bool CanInstall { get; set; }
         public bool BlockDownload { get; set; }
+        public UpdateLanguage Language { get; set; } = UpdateLanguage.Chinese;
+        public UpdateLanguage? SavedLanguage { get; private set; }
         public int InstallerCalls { get; private set; }
         public int PermissionRequests { get; private set; }
         public int Downloads { get; private set; }
         public UpdateServerOptions? SavedOptions { get; private set; }
         public MemoryInstallationStore Store { get; } = new();
         public List<IAndroidBootstrap> Bootstraps { get; } = [];
+        public List<UpdateLanguage> BootstrapLanguages { get; } = [];
         public TaskCompletionSource DownloadStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public string GetCurrentVersion() => Version;
+        public UpdateLanguage LoadLanguage() => Language;
+        public void SaveLanguage(UpdateLanguage language) { Language = language; SavedLanguage = language; }
+        public string GetCurrentVersion(UpdateLanguage language) => Version;
         public bool CanRequestInstalls() => CanInstall;
-        public void RequestInstallPermission() => PermissionRequests++;
+        public void RequestInstallPermission(UpdateLanguage language) => PermissionRequests++;
 
-        public UpdateServerOptions LoadServerOptions() => FailSettingsLoad ? throw new IOException("settings unavailable")
+        public UpdateServerOptions LoadServerOptions(UpdateLanguage language) => FailSettingsLoad ? throw new IOException("settings unavailable")
             : new() { RequestUrl = "https://example.test/check", AppKey = "demo", ProductId = "product", Platform = 3 };
 
-        public void SaveServerOptions(UpdateServerOptions options)
+        public void SaveServerOptions(UpdateServerOptions options, UpdateLanguage language)
         {
             if (FailSettingsSave) throw new IOException("settings read-only");
             SavedOptions = options;
         }
 
-        public IAndroidBootstrap CreateBootstrap(UpdateServerOptions? options)
+        public IAndroidBootstrap CreateBootstrap(UpdateServerOptions? options, UpdateLanguage language)
         {
             var bootstrap = TestBootstrap.Create(store: Store,
                 source: new DelegatePackageSource((_, _) => FailQuery
@@ -177,6 +220,7 @@ public sealed class UpdateViewModelTests
                     });
                 }));
             Bootstraps.Add(bootstrap);
+            BootstrapLanguages.Add(language);
             return bootstrap;
         }
 

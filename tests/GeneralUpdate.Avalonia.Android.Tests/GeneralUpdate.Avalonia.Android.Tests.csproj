@@ -8,6 +8,7 @@
 
   <ItemGroup>
     <Compile Include="../../samples/GeneralUpdate.Avalonia.Android.Sample/Infrastructure/IUpdateHost.cs" Link="Sample/IUpdateHost.cs" />
+    <Compile Include="../../samples/GeneralUpdate.Avalonia.Android.Sample/Infrastructure/UpdateViewText.cs" Link="Sample/UpdateViewText.cs" />
     <Compile Include="../../samples/GeneralUpdate.Avalonia.Android.Sample/ViewModels/UpdateViewModel.cs" Link="Sample/UpdateViewModel.cs" />
     <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Abstractions/IUpdatePackageSource.cs" Link="Source/Abstractions/IUpdatePackageSource.cs" />
     <Compile Include="../../src/GeneralUpdate.Avalonia.Android/Abstractions/IInstallationStore.cs" Link="Source/Abstractions/IInstallationStore.cs" />

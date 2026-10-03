@@ -6,10 +6,22 @@
              x:Class="GeneralUpdate.Avalonia.Android.Sample.Views.MainView">
   <ScrollViewer>
     <StackPanel Margin="20" Spacing="12">
-      <TextBlock Text="GeneralUpdate 移动端自动升级"
-                 FontSize="24"
-                 FontWeight="Bold" />
-      <TextBlock Text="连接 GeneralSpacestation，完成版本校验、APK 下载、SHA-256 校验和安装。"
+      <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+        <TextBlock Grid.Column="0"
+                   Text="{Binding Title}"
+                   FontSize="24"
+                   FontWeight="Bold"
+                   VerticalAlignment="Center" />
+        <StackPanel Grid.Column="1" Spacing="4">
+          <TextBlock Text="{Binding LanguageLabel}" />
+          <ComboBox SelectedIndex="{Binding LanguageIndex, Mode=TwoWay}"
+                    IsEnabled="{Binding CanChangeLanguage}">
+            <ComboBoxItem Content="English" />
+            <ComboBoxItem Content="中文" />
+          </ComboBox>
+        </StackPanel>
+      </Grid>
+      <TextBlock Text="{Binding Description}"
                  TextWrapping="Wrap"
                  Opacity="0.75" />
 
@@ -18,13 +30,13 @@
               Background="#14007ACC">
         <Grid ColumnDefinitions="Auto,*"
               RowDefinitions="Auto,Auto">
-          <TextBlock Grid.Row="0" Grid.Column="0" Text="当前版本：" />
+          <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding CurrentVersionLabel}" />
           <TextBlock x:Name="CurrentVersionText"
                      Text="{Binding CurrentVersion}"
                      Grid.Row="0"
                      Grid.Column="1"
                      FontWeight="SemiBold" />
-          <TextBlock Grid.Row="1" Grid.Column="0" Text="目标版本：" />
+          <TextBlock Grid.Row="1" Grid.Column="0" Text="{Binding TargetVersionLabel}" />
           <TextBlock x:Name="TargetVersionText"
                      Grid.Row="1"
                      Grid.Column="1"
@@ -36,12 +48,12 @@
                  Text="{Binding InstallationStatus}"
                  TextWrapping="Wrap" />
 
-      <TextBlock Text="GeneralSpacestation 配置"
+      <TextBlock Text="{Binding SettingsTitle}"
                  FontSize="18"
                  FontWeight="SemiBold"
                  Margin="0,8,0,0" />
 
-      <TextBlock Text="验证接口" />
+      <TextBlock Text="{Binding VerificationEndpointLabel}" />
       <TextBox x:Name="RequestUrlTextBox"
                Text="{Binding RequestUrl, Mode=TwoWay}"
                PlaceholderText="https://server/Upgrade/Verification" />
@@ -49,7 +61,7 @@
       <TextBlock Text="AppKey" />
       <TextBox x:Name="AppKeyTextBox"
                Text="{Binding AppKey, Mode=TwoWay}"
-               PlaceholderText="管理端配置的 AppKey" />
+               PlaceholderText="{Binding AppKeyPlaceholder}" />
 
       <Grid ColumnDefinitions="*,*"
             ColumnSpacing="12">
@@ -57,17 +69,17 @@
           <TextBlock Text="Platform" />
           <TextBox x:Name="PlatformTextBox"
                    Text="{Binding Platform, Mode=TwoWay}"
-                   PlaceholderText="Android 平台编号" />
+                   PlaceholderText="{Binding PlatformPlaceholder}" />
         </StackPanel>
         <StackPanel Grid.Column="1" Spacing="6">
           <TextBlock Text="ProductId" />
           <TextBox x:Name="ProductIdTextBox"
                    Text="{Binding ProductId, Mode=TwoWay}"
-                   PlaceholderText="产品编号" />
+                   PlaceholderText="{Binding ProductIdPlaceholder}" />
         </StackPanel>
       </Grid>
 
-      <TextBlock Text="更新说明"
+      <TextBlock Text="{Binding ReleaseNotesLabel}"
                  FontWeight="SemiBold"
                  Margin="0,8,0,0" />
       <TextBlock x:Name="ReleaseNotesText"
@@ -97,18 +109,18 @@
             Margin="0,8,0,20">
         <Button x:Name="StartButton"
                 Grid.Column="0"
-                Content="检查并自动升级"
+                Content="{Binding StartButtonText}"
                 HorizontalAlignment="Stretch"
                 IsEnabled="{Binding CanStart}"
                 Click="OnStartUpdate" />
         <Button x:Name="CancelButton"
                 Grid.Column="1"
-                Content="取消"
+                Content="{Binding CancelButtonText}"
                 HorizontalAlignment="Stretch"
                 IsEnabled="{Binding CanCancel}"
                 Click="OnCancelUpdate" />
       </Grid>
-      <Button Content="重置升级记录（不修改已安装应用）"
+      <Button Content="{Binding ResetButtonText}"
               IsEnabled="{Binding CanStart}"
               Click="OnResetInstallation" />
     </StackPanel>

@@ -15,21 +15,68 @@ internal sealed class UpdateViewModel(IUpdateHost host, IUpdateLogger logger) : 
     private bool _waitingForPermission;
     private bool _forced;
     private bool _running;
+    private bool _initialized;
+    private UpdateLanguage _language = UpdateLanguage.English;
+    private UpdateServerOptions? _serverOptions;
     private string _requestUrl = "", _appKey = "", _platform = "", _productId = "";
-    private string _currentVersion = "", _targetVersion = "尚未检查", _releaseNotes = "检查到新版本后显示";
-    private string _status = "等待检查更新", _installationStatus = "正在核对上次升级结果...", _progressText = "0%";
+    private string _currentVersion = "", _progressText = "0%";
+    private string? _targetVersion, _releaseNotes;
+    private string _targetVersionFallback = "Not checked", _releaseNotesFallback = "Shown when an update is found";
+    private string _statusKey = "Waiting for update check", _installationStatusKey = "Reconciling previous update...";
+    private object?[] _statusArguments = [], _installationStatusArguments = [];
     private double _progress;
 
     public event PropertyChangedEventHandler? PropertyChanged;
+    public UpdateLanguage Language
+    {
+        get => _language;
+        set
+        {
+            if (_language == value || _running) return;
+            _language = value;
+            NotifyLanguage();
+            if (!_initialized) return;
+            try
+            {
+                host.SaveLanguage(value);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
+            {
+                logger.LogError("Unable to save language preference.", ex);
+                SetStatus("Unable to save language preference.");
+            }
+            if (_bootstrap is not null) ReplaceBootstrap(_serverOptions);
+        }
+    }
+    public int LanguageIndex
+    {
+        get => Language == UpdateLanguage.Chinese ? 1 : 0;
+        set => Language = value == 1 ? UpdateLanguage.Chinese : UpdateLanguage.English;
+    }
+    public string LanguageLabel => Text("Language");
+    public string Title => Text("GeneralUpdate mobile updater");
+    public string Description => Text("Connect to GeneralSpacestation to check versions, download APKs, verify SHA-256, and install.");
+    public string CurrentVersionLabel => Text("Current version:");
+    public string TargetVersionLabel => Text("Target version:");
+    public string SettingsTitle => Text("GeneralSpacestation settings");
+    public string VerificationEndpointLabel => Text("Verification endpoint");
+    public string AppKeyPlaceholder => Text("AppKey configured in admin console");
+    public string PlatformPlaceholder => Text("Android platform number");
+    public string ProductIdPlaceholder => Text("Product ID");
+    public string ReleaseNotesLabel => Text("Release notes");
+    public string StartButtonText => Text("Check and update");
+    public string CancelButtonText => Text("Cancel");
+    public string ResetButtonText => Text("Reset update record (does not modify installed app)");
+    public bool CanChangeLanguage => !_running;
     public string RequestUrl { get => _requestUrl; set => Set(ref _requestUrl, value ?? string.Empty); }
     public string AppKey { get => _appKey; set => Set(ref _appKey, value ?? string.Empty); }
     public string Platform { get => _platform; set => Set(ref _platform, value ?? string.Empty); }
     public string ProductId { get => _productId; set => Set(ref _productId, value ?? string.Empty); }
     public string CurrentVersion { get => _currentVersion; private set => Set(ref _currentVersion, value); }
-    public string TargetVersion { get => _targetVersion; private set => Set(ref _targetVersion, value); }
-    public string ReleaseNotes { get => _releaseNotes; private set => Set(ref _releaseNotes, value); }
-    public string Status { get => _status; private set => Set(ref _status, value); }
-    public string InstallationStatus { get => _installationStatus; private set => Set(ref _installationStatus, value); }
+    public string TargetVersion => _targetVersion ?? Text(_targetVersionFallback);
+    public string ReleaseNotes => _releaseNotes ?? Text(_releaseNotesFallback);
+    public string Status => UpdateViewText.Format(Language, _statusKey, _statusArguments);
+    public string InstallationStatus => UpdateViewText.Format(Language, _installationStatusKey, _installationStatusArguments);
     public string ProgressText { get => _progressText; private set => Set(ref _progressText, value); }
     public double Progress { get => _progress; private set => Set(ref _progress, value); }
     public bool CanStart => !_running;
@@ -37,21 +84,27 @@ internal sealed class UpdateViewModel(IUpdateHost host, IUpdateLogger logger) : 
 
     public Task InitializeAsync() => RunAsync(async ct =>
     {
+        _language = host.LoadLanguage();
+        NotifyLanguage();
+        _initialized = true;
         ReplaceBootstrap(null);
         var reconciled = await RefreshInstallationAsync(ct);
-        var options = host.LoadServerOptions();
+        var options = host.LoadServerOptions(Language);
         RequestUrl = options.RequestUrl;
         AppKey = options.AppKey;
         Platform = options.Platform.ToString(System.Globalization.CultureInfo.InvariantCulture);
         ProductId = options.ProductId;
+        _serverOptions = options;
         ReplaceBootstrap(options);
         if (!reconciled) return;
-        Status = "正在自动检查服务端版本...";
+        SetStatus("Checking server version automatically...");
         var check = await _bootstrap!.ValidateAsync(CurrentVersion, ct);
-        if (!check.Success) { Status = Describe(check); return; }
-        TargetVersion = check.UpdateFound ? check.PackageInfo!.Version : "已是最新版本";
-        ReleaseNotes = check.PackageInfo?.Description ?? "服务端未提供更新说明。";
-        Status = check.UpdateFound ? "发现新版本，点击“检查并自动升级”开始下载和安装。" : "当前已经是最新版本。";
+        if (!check.Success) { SetFailureStatus(check); return; }
+        SetTargetVersion(check.UpdateFound ? check.PackageInfo!.Version : null, "Latest version");
+        SetReleaseNotes(check.PackageInfo?.Description, "The server did not provide release notes.");
+        SetStatus(check.UpdateFound
+            ? "New version found. Select “Check and update” to download and install."
+            : "The app is up to date.");
     });
 
     public Task StartAsync() => RunAsync(async ct =>
@@ -59,19 +112,20 @@ internal sealed class UpdateViewModel(IUpdateHost host, IUpdateLogger logger) : 
         _pending = null;
         _waitingForPermission = false;
         var options = ReadOptions();
-        host.SaveServerOptions(options);
+        host.SaveServerOptions(options, Language);
+        _serverOptions = options;
         ReplaceBootstrap(options);
         Progress = 0;
         ProgressText = "0%";
         if (!await RefreshInstallationAsync(ct)) return;
 
-        Status = "正在检查并准备升级包...";
+        SetStatus("Checking and preparing update...");
         var prepared = await _bootstrap!.PrepareUpdateAsync(CurrentVersion, ct);
-        if (!prepared.Success) { Status = Describe(prepared); return; }
+        if (!prepared.Success) { SetFailureStatus(prepared); return; }
         if (!prepared.IsReadyToInstall)
         {
-            TargetVersion = "已是最新版本";
-            Status = "当前已经是最新版本。";
+            SetTargetVersion(null, "Latest version");
+            SetStatus("The app is up to date.");
             return;
         }
         _pending = prepared;
@@ -96,11 +150,11 @@ internal sealed class UpdateViewModel(IUpdateHost host, IUpdateLogger logger) : 
     {
         if (_bootstrap is null) ReplaceBootstrap(null);
         var result = await _bootstrap!.ResetInstallationAsync(ct);
-        if (!result.Success) { Status = Describe(result); return; }
+        if (!result.Success) { SetFailureStatus(result); return; }
         _pending = null;
         _waitingForPermission = false;
         if (await RefreshInstallationAsync(ct))
-            Status = "升级记录已重置，未修改已安装应用。可以重新检查升级。";
+            SetStatus("Update record reset. The installed app was not changed. You can check for updates again.");
     });
 
     public void Cancel() => _cancellation?.Cancel();
@@ -135,13 +189,13 @@ internal sealed class UpdateViewModel(IUpdateHost host, IUpdateLogger logger) : 
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {
-            Status = "更新操作已取消。";
+            SetStatus("Update operation canceled.");
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or
             InvalidOperationException or ArgumentException)
         {
             logger.LogError("Update host operation failed.", ex);
-            Status = $"更新操作失败：{ex.Message}";
+            SetStatus("Update operation failed: {0}", ex.Message);
         }
         finally
         {
@@ -153,7 +207,7 @@ internal sealed class UpdateViewModel(IUpdateHost host, IUpdateLogger logger) : 
 
     private void ReplaceBootstrap(UpdateServerOptions? options)
     {
-        var bootstrap = host.CreateBootstrap(options);
+        var bootstrap = host.CreateBootstrap(options, Language);
         _bootstrap?.Dispose();
         _bootstrap = bootstrap;
         _bootstrap.AddListenerValidate += (_, args) =>
@@ -161,8 +215,8 @@ internal sealed class UpdateViewModel(IUpdateHost host, IUpdateLogger logger) : 
             if (!ReferenceEquals(_bootstrap, bootstrap)) return;
             _forced = args.PackageInfo.IsForced;
             NotifyAvailability();
-            TargetVersion = args.PackageInfo.Version;
-            ReleaseNotes = args.PackageInfo.Description ?? "服务端未提供更新说明。";
+            SetTargetVersion(args.PackageInfo.Version, "Not checked");
+            SetReleaseNotes(args.PackageInfo.Description, "The server did not provide release notes.");
         };
         _bootstrap.AddListenerDownloadProgressChanged += (_, args) =>
         {
@@ -184,30 +238,38 @@ internal sealed class UpdateViewModel(IUpdateHost host, IUpdateLogger logger) : 
         {
             _pending = null;
             _waitingForPermission = false;
-            if (reconciled) Status = "系统安装器已打开，请确认安装。重新打开应用后会核对升级结果。";
+            if (reconciled) SetStatus("System installer opened. Confirm installation; the app will check the result when reopened.");
         }
         else if (reconciled && result.FailureReason == UpdateFailureReason.InstallPermissionDenied)
         {
             _waitingForPermission = true;
-            Status = "请开启“允许安装未知应用”，返回后会重试安装。";
-            host.RequestInstallPermission();
+            SetStatus("Allow installation from unknown sources, then return to retry.");
+            host.RequestInstallPermission(Language);
         }
         else if (reconciled)
         {
             _waitingForPermission = false;
-            Status = Describe(result);
+            SetFailureStatus(result);
         }
     }
 
     private async Task<bool> RefreshInstallationAsync(CancellationToken ct)
     {
-        CurrentVersion = host.GetCurrentVersion();
+        CurrentVersion = host.GetCurrentVersion(Language);
         var result = await _bootstrap!.CheckInstallationAsync(CurrentVersion, ct);
-        InstallationStatus = !result.Success ? Describe(result)
-            : result.IsInstalled ? $"升级已确认：目标 {result.Record!.TargetVersion}，当前 {CurrentVersion}。"
-            : result.HasPendingInstallation ? $"升级尚未确认：目标 {result.Record!.TargetVersion}，当前 {CurrentVersion}。可以重新检查并重试。"
-            : "暂无升级记录。";
-        if (!result.Success) Status = Describe(result) + " 如记录损坏，可显式重置升级记录。";
+        if (!result.Success)
+        {
+            var message = UpdateViewText.Format(Language, "Update failed ({0}): {1}",
+                result.FailureReason, result.Exception?.Message ?? result.Message);
+            SetInstallationStatus("Update error: {0}. If the record is corrupt, explicitly reset the update record.", message);
+            SetStatus("Update error: {0}. If the record is corrupt, explicitly reset the update record.", message);
+        }
+        else if (result.IsInstalled)
+            SetInstallationStatus("Update confirmed: target {0}, current {1}.", result.Record!.TargetVersion, CurrentVersion);
+        else if (result.HasPendingInstallation)
+            SetInstallationStatus("Update not confirmed: target {0}, current {1}. You can check and retry.", result.Record!.TargetVersion, CurrentVersion);
+        else
+            SetInstallationStatus("No update record.");
         return result.Success;
     }
 
@@ -215,11 +277,11 @@ internal sealed class UpdateViewModel(IUpdateHost host, IUpdateLogger logger) : 
     {
         if (!Uri.TryCreate(RequestUrl, UriKind.Absolute, out var uri) ||
             (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
-            throw new ArgumentException("请输入有效的 HTTP 或 HTTPS 验证接口地址。");
+            throw new ArgumentException(Text("Enter a valid HTTP or HTTPS verification URL."));
         if (!int.TryParse(Platform, out var platform) || platform <= 0)
-            throw new ArgumentException("Platform 必须是服务端配置的正整数平台编号。");
+            throw new ArgumentException(Text("Platform must be a positive integer configured on the server."));
         if (string.IsNullOrWhiteSpace(ProductId))
-            throw new ArgumentException("请输入 ProductId。");
+            throw new ArgumentException(Text("Enter a ProductId."));
         return new UpdateServerOptions
         {
             RequestUrl = uri.AbsoluteUri,
@@ -230,14 +292,70 @@ internal sealed class UpdateViewModel(IUpdateHost host, IUpdateLogger logger) : 
         };
     }
 
-    private static string Describe(UpdateOperationResult result) =>
-        result.State == UpdateState.Canceled ? "更新操作已取消。"
-            : $"更新失败：{result.FailureReason}。{result.Exception?.Message ?? result.Message}";
+    private void SetFailureStatus(UpdateOperationResult result) =>
+        SetStatus(result.State == UpdateState.Canceled
+            ? "Update operation canceled."
+            : "Update failed ({0}): {1}", result.FailureReason, result.Exception?.Message ?? result.Message);
+
+    private string Text(string key) => UpdateViewText.Get(Language, key);
+
+    private void SetStatus(string key, params object?[] arguments)
+    {
+        _statusKey = key;
+        _statusArguments = arguments;
+        PropertyChanged?.Invoke(this, new(nameof(Status)));
+    }
+
+    private void SetInstallationStatus(string key, params object?[] arguments)
+    {
+        _installationStatusKey = key;
+        _installationStatusArguments = arguments;
+        PropertyChanged?.Invoke(this, new(nameof(InstallationStatus)));
+    }
+
+    private void SetTargetVersion(string? value, string fallbackKey)
+    {
+        _targetVersion = value;
+        _targetVersionFallback = fallbackKey;
+        PropertyChanged?.Invoke(this, new(nameof(TargetVersion)));
+    }
+
+    private void SetReleaseNotes(string? value, string fallbackKey)
+    {
+        _releaseNotes = value;
+        _releaseNotesFallback = fallbackKey;
+        PropertyChanged?.Invoke(this, new(nameof(ReleaseNotes)));
+    }
+
+    private void NotifyLanguage()
+    {
+        PropertyChanged?.Invoke(this, new(nameof(Language)));
+        PropertyChanged?.Invoke(this, new(nameof(LanguageIndex)));
+        PropertyChanged?.Invoke(this, new(nameof(LanguageLabel)));
+        PropertyChanged?.Invoke(this, new(nameof(Title)));
+        PropertyChanged?.Invoke(this, new(nameof(Description)));
+        PropertyChanged?.Invoke(this, new(nameof(CurrentVersionLabel)));
+        PropertyChanged?.Invoke(this, new(nameof(TargetVersionLabel)));
+        PropertyChanged?.Invoke(this, new(nameof(SettingsTitle)));
+        PropertyChanged?.Invoke(this, new(nameof(VerificationEndpointLabel)));
+        PropertyChanged?.Invoke(this, new(nameof(AppKeyPlaceholder)));
+        PropertyChanged?.Invoke(this, new(nameof(PlatformPlaceholder)));
+        PropertyChanged?.Invoke(this, new(nameof(ProductIdPlaceholder)));
+        PropertyChanged?.Invoke(this, new(nameof(ReleaseNotesLabel)));
+        PropertyChanged?.Invoke(this, new(nameof(StartButtonText)));
+        PropertyChanged?.Invoke(this, new(nameof(CancelButtonText)));
+        PropertyChanged?.Invoke(this, new(nameof(ResetButtonText)));
+        PropertyChanged?.Invoke(this, new(nameof(TargetVersion)));
+        PropertyChanged?.Invoke(this, new(nameof(ReleaseNotes)));
+        PropertyChanged?.Invoke(this, new(nameof(Status)));
+        PropertyChanged?.Invoke(this, new(nameof(InstallationStatus)));
+    }
 
     private void NotifyAvailability()
     {
         PropertyChanged?.Invoke(this, new(nameof(CanStart)));
         PropertyChanged?.Invoke(this, new(nameof(CanCancel)));
+        PropertyChanged?.Invoke(this, new(nameof(CanChangeLanguage)));
     }
 
     private void Set<T>(ref T field, T value, [CallerMemberName] string? name = null)

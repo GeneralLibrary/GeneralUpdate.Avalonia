@@ -32,7 +32,8 @@ ViewModel 不依赖 Android/Avalonia API，可独立测试。启动时先离线�
 - `Hash` 是 APK 文件的 64 位十六进制 SHA-256。
 - `Version` 高于示例工程的 `ApplicationDisplayVersion`。
 
-启动应用后填写验证接口、`AppKey`、`Platform` 和 `ProductId`，点击“检查并自动升级”。
+启动应用后可在页面顶部选择中文或英文（选择会保存），然后填写验证接口、`AppKey`、`Platform` 和 `ProductId`，
+点击“检查并自动升级”。界面提示、表单校验和 Android 平台错误会按所选语言显示。
 
 ## 运行
 

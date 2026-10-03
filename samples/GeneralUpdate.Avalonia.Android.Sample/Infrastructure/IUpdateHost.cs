@@ -5,10 +5,12 @@ namespace GeneralUpdate.Avalonia.Android.Sample.Infrastructure;
 
 internal interface IUpdateHost
 {
-    string GetCurrentVersion();
-    UpdateServerOptions LoadServerOptions();
-    void SaveServerOptions(UpdateServerOptions options);
-    IAndroidBootstrap CreateBootstrap(UpdateServerOptions? options);
+    UpdateLanguage LoadLanguage();
+    void SaveLanguage(UpdateLanguage language);
+    string GetCurrentVersion(UpdateLanguage language);
+    UpdateServerOptions LoadServerOptions(UpdateLanguage language);
+    void SaveServerOptions(UpdateServerOptions options, UpdateLanguage language);
+    IAndroidBootstrap CreateBootstrap(UpdateServerOptions? options, UpdateLanguage language);
     bool CanRequestInstalls();
-    void RequestInstallPermission();
+    void RequestInstallPermission(UpdateLanguage language);
 }
